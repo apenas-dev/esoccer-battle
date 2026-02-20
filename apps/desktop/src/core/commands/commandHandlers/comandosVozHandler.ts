@@ -24,6 +24,6 @@ export async function handleComandosVoz(): Promise<ComandosVozResult> {
   return {
     success: true,
     commands,
-    message: 'Comandos disponíveis: volta seis, resultado, intervalo, dúvida agora, encerrar, adicionar ponto ao time A, adicionar ponto ao time B, e comandos de voz.',
+    message: 'Comandos disponíveis: volta seis, resultado, intervalo, dúvida agora, encerrar, gol para o time A, gol para o time B, e comandos de voz.',
   };
 }
