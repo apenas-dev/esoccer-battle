@@ -17,11 +17,13 @@ export async function handleComandosVoz(): Promise<ComandosVozResult> {
     'Dúvida agora - Marca momento para revisão',
     'Encerrar - Finaliza a partida',
     'Comandos de voz - Lista os comandos disponíveis',
+    'Gol para o time A - Adiciona um ponto para o Time A',
+    'Gol para o time B - Adiciona um ponto para o Time B',
   ];
 
   return {
     success: true,
     commands,
-    message: 'Comandos disponíveis: volta seis, resultado, intervalo, dúvida agora, encerrar, e comandos de voz.',
+    message: 'Comandos disponíveis: volta seis, resultado, intervalo, dúvida agora, encerrar, adicionar ponto ao time A, adicionar ponto ao time B, e comandos de voz.',
   };
 }
