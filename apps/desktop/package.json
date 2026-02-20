@@ -1,0 +1,62 @@
+{
+  "name": "@esoccer-battle/desktop",
+  "version": "0.1.0",
+  "description": "E-Soccer Battle Desktop App - Volta 6 Minutos",
+  "main": "dist-electron/main/index.js",
+  "type": "module",
+  "author": {
+    "name": "E-Soccer Battle Team",
+    "email": "contact@esoccer-battle.com"
+  },
+  "homepage": "https://github.com/esoccer-battle/desktop",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron-vite dev",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "build:win": "pnpm build && electron-builder --win",
+    "build:linux": "pnpm build && electron-builder --linux",
+    "build:all": "pnpm build && electron-builder --win --linux",
+    "test:e2e": "vitest run",
+    "test:e2e:watch": "vitest",
+    "test:e2e:ui": "npx playwright test --config=playwright.config.ts",
+    "test:e2e:ui:headed": "npx playwright test --config=playwright.config.ts --headed",
+    "test:e2e:ui:debug": "npx playwright test --config=playwright.config.ts --debug",
+    "test:e2e:all": "yarn test:e2e && yarn test:e2e:ui",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "electron-rebuild -f -w better-sqlite3",
+    "rebuild": "electron-rebuild -f -w better-sqlite3",
+    "clean": "rm -rf node_modules dist dist-electron",
+    "reinstall": "pnpm clean && pnpm install"
+  },
+  "devDependencies": {
+    "@electron-toolkit/preload": "^3.0.0",
+    "@electron-toolkit/utils": "^3.0.0",
+    "@electron/rebuild": "^4.0.3",
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.45",
+    "@types/react-dom": "^18.2.18",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.16",
+    "electron": "^28.1.0",
+    "electron-builder": "^24.9.1",
+    "electron-playwright-helpers": "^2.1.0",
+    "electron-vite": "^2.0.0",
+    "playwright": "^1.58.2",
+    "postcss": "^8.4.32",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.1.0"
+  },
+  "dependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.6.2",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

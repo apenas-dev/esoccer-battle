@@ -1,0 +1,3 @@
+esoccer_voice
+models
+venv

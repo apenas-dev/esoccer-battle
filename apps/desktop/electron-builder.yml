@@ -1,0 +1,81 @@
+# E-Soccer Battle - Electron Builder Configuration
+appId: com.esoccer-battle.desktop
+productName: E-Soccer Battle
+copyright: Copyright © 2025 E-Soccer Battle
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+
+extraResources:
+  - from: ../../backend/voice-engine
+    to: voice-engine
+    filter:
+      - "**/*"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+      - "!**/.venv/**"
+      - "!**/venv/**"
+      - "!**/.git/**"
+
+# Windows configuration
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: true
+
+portable:
+  artifactName: ${productName}-${version}-portable.exe
+
+# Linux configuration
+linux:
+  icon: build/icon.png
+  category: Game
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+    - target: tar.gz
+      arch:
+        - x64
+
+appImage:
+  artifactName: ${productName}-${version}.AppImage
+
+deb:
+  artifactName: esoccer-battle_${version}_${arch}.deb
+  depends:
+    - python3
+    - python3-pip
+    - python3-venv
+
+# macOS configuration (optional)
+mac:
+  icon: build/icon.png
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+
+# Don't publish anywhere
+publish: null

@@ -1,0 +1,27 @@
+# E-Soccer Voice Engine Dependencies
+# FastAPI and Server
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+
+# Speech-to-Text (Whisper)
+faster-whisper>=1.0.0
+
+# Text-to-Speech (Kokoro)
+kokoro>=0.3.0
+
+# Audio Processing
+pydub>=0.25.1
+soundfile>=0.12.1
+numpy>=1.24.0
+
+# PyTorch (CPU-only recommended for this project)
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Model Hub
+huggingface-hub>=0.20.0
+
+# Dev dependencies (optional)
+# pytest>=7.4.0
+# httpx>=0.26.0

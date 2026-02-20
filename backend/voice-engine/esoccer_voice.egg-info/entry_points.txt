@@ -1,0 +1,2 @@
+[console_scripts]
+esoccer-voice = esoccer_voice.api.main:runServer
