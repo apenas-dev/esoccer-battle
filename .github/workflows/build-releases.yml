@@ -1,0 +1,79 @@
+name: Build Executables
+
+on:
+  workflow_dispatch: # Permite rodar manualmente pelo painel do GitHub
+  push:
+    branches:
+      - master
+      - main
+    tags:
+      - 'v*' # Roda quando você cria uma tag (ex: v1.0.0)
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Enable Corepack (for pnpm)
+        run: corepack enable
+
+      - name: Install dependencies
+        working-directory: apps/desktop
+        run: pnpm install
+
+      - name: Build Windows Executable
+        working-directory: apps/desktop
+        run: pnpm build && npx electron-builder --win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-executable
+          path: apps/desktop/release/*.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies for Linux build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm fakeroot dpkg
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Enable Corepack (for pnpm)
+        run: corepack enable
+
+      - name: Install dependencies
+        working-directory: apps/desktop
+        run: pnpm install
+
+      - name: Build Linux Executables
+        working-directory: apps/desktop
+        run: pnpm build && npx electron-builder --linux
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-executables
+          path: |
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.deb
+            apps/desktop/release/*.tar.gz
