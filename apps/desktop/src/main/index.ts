@@ -32,7 +32,7 @@ const PYTHON_BACKEND_URL = 'http://127.0.0.1:8001';
 function logMessage(level: 'info' | 'error' | 'warn', message: string): void {
   const timestamp = new Date().toISOString();
   const logLine = `[${timestamp}] [${level.toUpperCase()}] ${message}`;
-  
+
   if (level === 'error') {
     console.error(logLine);
   } else if (level === 'warn') {
@@ -40,7 +40,7 @@ function logMessage(level: 'info' | 'error' | 'warn', message: string): void {
   } else {
     console.log(logLine);
   }
-  
+
   // Write to log file for debugging
   try {
     const logDir = join(app.getPath('userData'), 'logs');
@@ -90,13 +90,29 @@ async function waitForBackendReady(timeoutMs: number = 30000): Promise<boolean> 
 
 /**
  * Check if Python is installed and available
+ * On Windows, tries 'py' launcher first (bypasses Microsoft Store alias)
+ * Uses short timeout to avoid hanging on stub executables
  */
 function isPythonAvailable(): { available: boolean; command: string; version?: string } {
-  const pythonCommands = ['python3', 'python'];
+  const isWindows = process.platform === 'win32';
+  const pythonCommands = isWindows
+    ? ['py', 'python', 'python3']
+    : ['python3', 'python'];
 
   for (const cmd of pythonCommands) {
     try {
-      const version = execSync(`${cmd} --version`, { encoding: 'utf8', timeout: 5000 }).trim();
+      const version = execSync(`${cmd} --version`, {
+        encoding: 'utf8',
+        timeout: 3000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+
+      // Validate it's real Python (not MS Store stub)
+      if (!version.toLowerCase().startsWith('python')) {
+        logMessage('warn', `Command '${cmd}' returned unexpected output: ${version}`);
+        continue;
+      }
+
       logMessage('info', `Found Python: ${cmd} (${version})`);
       return { available: true, command: cmd, version };
     } catch {
@@ -131,60 +147,59 @@ function checkPythonDependencies(pythonCmd: string, voiceEnginePath: string): { 
   // List of critical dependencies that MUST be installed
   const criticalDependencies = [
     'fastapi',
-    'uvicorn', 
+    'uvicorn',
     'pydub',
     'numpy',
     'faster_whisper',  // Critical for STT
   ];
-  
+
   const missingDeps: string[] = [];
-  
+
   // Build the same environment that will be used for execution
-  const checkEnv = {
-    ...process.env,
-    PYTHONPATH: voiceEnginePath,
-    PYTHONUNBUFFERED: '1',
-  };
-  
+  const checkEnv = buildPythonEnv(voiceEnginePath);
+
+  // Escape backslashes for safe injection in Python -c strings (Windows paths)
+  const safePath = voiceEnginePath.replace(/\\/g, '\\\\');
+
   try {
     // Check each critical dependency individually with the SAME env as execution
     for (const dep of criticalDependencies) {
       try {
-        const result = execSync(
+        execSync(
           `${pythonCmd} -c "import ${dep}; print('${dep} OK')"`,
-          { 
-            encoding: 'utf8', 
-            timeout: 15000, 
-            cwd: voiceEnginePath, 
+          {
+            encoding: 'utf8',
+            timeout: 15000,
+            cwd: voiceEnginePath,
             env: checkEnv,
-            stdio: 'pipe' 
+            stdio: ['ignore', 'pipe', 'pipe'],
           }
         );
         logMessage('info', `Dependency check: ${dep} - OK`);
-      } catch (depError) {
+      } catch {
         logMessage('warn', `Missing Python dependency: ${dep}`);
         missingDeps.push(dep);
       }
     }
-    
+
     if (missingDeps.length > 0) {
-      return { 
-        installed: false, 
+      return {
+        installed: false,
         error: `Dependências não encontradas: ${missingDeps.join(', ')}`,
-        missingDeps 
+        missingDeps
       };
     }
-    
+
     // Also verify the esoccer_voice module structure (with same env)
     try {
       execSync(
-        `${pythonCmd} -c "import sys; sys.path.insert(0, '${voiceEnginePath}'); from esoccer_voice.api import main; print('esoccer_voice OK')"`,
-        { 
-          encoding: 'utf8', 
-          timeout: 15000, 
-          cwd: voiceEnginePath, 
+        `${pythonCmd} -c "import sys; sys.path.insert(0, '${safePath}'); from esoccer_voice.api import main; print('esoccer_voice OK')"`,
+        {
+          encoding: 'utf8',
+          timeout: 15000,
+          cwd: voiceEnginePath,
           env: checkEnv,
-          stdio: 'pipe' 
+          stdio: ['ignore', 'pipe', 'pipe'],
         }
       );
       logMessage('info', 'esoccer_voice module check: OK');
@@ -193,7 +208,7 @@ function checkPythonDependencies(pythonCmd: string, voiceEnginePath: string): { 
       logMessage('warn', `esoccer_voice module check failed: ${errorMsg}`);
       return { installed: false, error: `Módulo esoccer_voice não carrega: ${errorMsg}` };
     }
-    
+
     logMessage('info', 'Python dependencies check passed (all critical deps verified)');
     return { installed: true };
   } catch (error) {
@@ -204,42 +219,76 @@ function checkPythonDependencies(pythonCmd: string, voiceEnginePath: string): { 
 }
 
 /**
+ * Build a consistent Python environment for subprocess execution
+ * Disables interactive prompts and keyring to prevent hangs on Windows
+ */
+function buildPythonEnv(voiceEnginePath: string): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    PYTHONPATH: voiceEnginePath,
+    PYTHONUNBUFFERED: '1',
+    // Disable pip keyring and prompts (prevents Windows hangs)
+    PIP_NO_INPUT: '1',
+    PYTHON_KEYRING_BACKEND: 'keyring.backends.null.Keyring',
+  };
+}
+
+/**
+ * Get platform-specific pip installation strategies
+ * Windows: system-wide first (no --user needed), no --break-system-packages
+ * Linux: --user with --break-system-packages for modern distros
+ */
+function getPipStrategies(pythonCmd: string, requirementsPath: string): string[] {
+  const isWindows = process.platform === 'win32';
+  const noInput = '--no-input';
+
+  if (isWindows) {
+    return [
+      `${pythonCmd} -m pip install ${noInput} -r "${requirementsPath}"`,
+      `${pythonCmd} -m pip install ${noInput} --user -r "${requirementsPath}"`,
+    ];
+  }
+
+  return [
+    `${pythonCmd} -m pip install ${noInput} --user --break-system-packages -r "${requirementsPath}"`,
+    `${pythonCmd} -m pip install ${noInput} --user -r "${requirementsPath}"`,
+    `${pythonCmd} -m pip install ${noInput} -r "${requirementsPath}"`,
+  ];
+}
+
+/**
  * Try to install Python dependencies
- * Uses --user mode to avoid permission issues on Linux
- * Multiple strategies for different environments (AppImage, system install, etc.)
+ * Uses platform-aware strategies and non-interactive mode
  */
 async function installPythonDependencies(pythonCmd: string, voiceEnginePath: string): Promise<boolean> {
   logMessage('info', 'Attempting to install Python dependencies...');
-  
+
   const requirementsPath = join(voiceEnginePath, 'requirements.txt');
-  
+
   if (!existsSync(requirementsPath)) {
     logMessage('error', `requirements.txt not found at: ${requirementsPath}`);
     return false;
   }
 
-  // Installation strategies to try in order
-  const installStrategies = [
-    // Strategy 1: --user with --break-system-packages (modern Python on Linux)
-    `${pythonCmd} -m pip install --user --break-system-packages -r "${requirementsPath}"`,
-    // Strategy 2: --user only (older pip versions)
-    `${pythonCmd} -m pip install --user -r "${requirementsPath}"`,
-    // Strategy 3: system-wide (requires permissions, may work on some systems)
-    `${pythonCmd} -m pip install -r "${requirementsPath}"`,
-  ];
-  
+  const pipEnv = buildPythonEnv(voiceEnginePath);
+
   // First, try to upgrade pip (ignore errors)
   logMessage('info', 'Attempting to upgrade pip...');
-  for (const upgradeCmd of [
-    `${pythonCmd} -m pip install --user --break-system-packages --upgrade pip`,
-    `${pythonCmd} -m pip install --user --upgrade pip`,
-  ]) {
+  const upgradeStrategies = process.platform === 'win32'
+    ? [`${pythonCmd} -m pip install --no-input --upgrade pip`]
+    : [
+      `${pythonCmd} -m pip install --no-input --user --break-system-packages --upgrade pip`,
+      `${pythonCmd} -m pip install --no-input --user --upgrade pip`,
+    ];
+
+  for (const upgradeCmd of upgradeStrategies) {
     try {
       execSync(upgradeCmd, {
         encoding: 'utf8',
         timeout: 60000,
         cwd: voiceEnginePath,
-        stdio: 'pipe',
+        env: pipEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
       logMessage('info', 'Pip upgrade successful');
       break;
@@ -247,22 +296,25 @@ async function installPythonDependencies(pythonCmd: string, voiceEnginePath: str
       // Continue to next strategy
     }
   }
-  
+
   // Try each installation strategy
+  const installStrategies = getPipStrategies(pythonCmd, requirementsPath);
+
   for (let i = 0; i < installStrategies.length; i++) {
     const pipCmd = installStrategies[i];
     logMessage('info', `Install strategy ${i + 1}/${installStrategies.length}: ${pipCmd}`);
-    
+
     try {
       execSync(pipCmd, {
         encoding: 'utf8',
-        timeout: 900000, // 15 minute timeout for installation (large packages like whisper ~1GB)
+        timeout: 900000, // 15 minute timeout (large packages like whisper ~1GB)
         cwd: voiceEnginePath,
-        stdio: 'pipe',
+        env: pipEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
-      
+
       logMessage('info', `Strategy ${i + 1} completed, verifying installation...`);
-      
+
       // Verify installation was successful
       const verifyResult = checkPythonDependencies(pythonCmd, voiceEnginePath);
       if (verifyResult.installed) {
@@ -278,7 +330,7 @@ async function installPythonDependencies(pythonCmd: string, voiceEnginePath: str
       // Continue to next strategy
     }
   }
-  
+
   // All strategies failed
   logMessage('error', 'All installation strategies failed');
   dialog.showErrorBox(
@@ -286,7 +338,7 @@ async function installPythonDependencies(pythonCmd: string, voiceEnginePath: str
     `Não foi possível instalar as dependências Python automaticamente.\n\n` +
     `Tente executar manualmente em um terminal:\n\n` +
     `cd "${voiceEnginePath}"\n` +
-    `${pythonCmd} -m pip install --user -r requirements.txt\n\n` +
+    `${pythonCmd} -m pip install --no-input -r requirements.txt\n\n` +
     `Se o erro persistir, verifique se você tem permissão para instalar pacotes Python.`
   );
   return false;
@@ -303,10 +355,10 @@ async function startPythonBackend(): Promise<boolean> {
     dialog.showErrorBox(
       'Python não encontrado',
       'O E-Soccer Battle requer Python 3.8+ para funcionar.\n\n' +
-        'Por favor, instale Python em:\n' +
-        '- Windows: https://www.python.org/downloads/\n' +
-        '- Linux: sudo apt install python3 python3-pip python3-venv\n\n' +
-        'Após instalar, reinicie o aplicativo.'
+      'Por favor, instale Python em:\n' +
+      '- Windows: https://www.python.org/downloads/\n' +
+      '- Linux: sudo apt install python3 python3-pip python3-venv\n\n' +
+      'Após instalar, reinicie o aplicativo.'
     );
     return false;
   }
@@ -324,7 +376,7 @@ async function startPythonBackend(): Promise<boolean> {
     dialog.showErrorBox(
       'Backend não encontrado',
       `O backend de voz não foi encontrado em:\n${voiceEnginePath}\n\n` +
-        'Verifique se a instalação foi concluída corretamente.'
+      'Verifique se a instalação foi concluída corretamente.'
     );
     return false;
   }
@@ -332,14 +384,14 @@ async function startPythonBackend(): Promise<boolean> {
   // Check if dependencies are installed
   logMessage('info', `Checking Python dependencies with command: ${python.command}`);
   const depsCheck = checkPythonDependencies(python.command, voiceEnginePath);
-  
+
   if (!depsCheck.installed) {
     logMessage('info', `Dependencies not installed: ${depsCheck.error}`);
     if (depsCheck.missingDeps) {
       logMessage('info', `Missing dependencies: ${depsCheck.missingDeps.join(', ')}`);
     }
     logMessage('info', 'Attempting auto-install...');
-    
+
     // Show notification to user
     const shouldInstall = dialog.showMessageBoxSync({
       type: 'question',
@@ -349,7 +401,7 @@ async function startPythonBackend(): Promise<boolean> {
       message: 'As dependências Python do E-Soccer Battle precisam ser instaladas.',
       detail: 'Isso pode levar alguns minutos na primeira execução.\n\nDeseja instalar agora?'
     });
-    
+
     if (shouldInstall === 0) {
       const installed = await installPythonDependencies(python.command, voiceEnginePath);
       if (!installed) {
@@ -371,7 +423,7 @@ async function startPythonBackend(): Promise<boolean> {
     // Models directory - use app.getPath('userData') for writable storage
     // This is critical for AppImage which mounts as read-only
     const modelsDir = join(app.getPath('userData'), 'models');
-    
+
     // Ensure models directory exists
     if (!existsSync(modelsDir)) {
       mkdirSync(modelsDir, { recursive: true });
@@ -380,9 +432,7 @@ async function startPythonBackend(): Promise<boolean> {
 
     const pythonArgs = ['-m', 'esoccer_voice.api.main'];
     const env = {
-      ...process.env,
-      PYTHONPATH: voiceEnginePath,
-      PYTHONUNBUFFERED: '1',
+      ...buildPythonEnv(voiceEnginePath),
       ESOCCER_MODELS_DIR: modelsDir,  // Pass writable models directory to Python
     };
 
@@ -399,7 +449,7 @@ async function startPythonBackend(): Promise<boolean> {
 
     // Capture startup errors
     let startupErrors: string[] = [];
-    
+
     // Log stdout
     pythonProcess.stdout?.on('data', (data: Buffer) => {
       const msg = data.toString().trim();
@@ -435,7 +485,7 @@ async function startPythonBackend(): Promise<boolean> {
 
     // Wait for backend to be ready with health check
     const isReady = await waitForBackendReady(30000); // 30 second timeout
-    
+
     if (isReady) {
       logMessage('info', 'Python voice-engine started and ready');
       backendError = null;
@@ -444,13 +494,13 @@ async function startPythonBackend(): Promise<boolean> {
       backendError = 'Backend iniciou mas não respondeu ao health check.\n' +
         'Verifique os logs em: ' + join(app.getPath('userData'), 'logs', 'backend.log');
       logMessage('warn', 'Backend started but health check failed');
-      
+
       // Check if process is still running
       if (pythonProcess && pythonProcess.exitCode === null) {
         logMessage('info', 'Process still running, may connect later');
         return true; // Let it try to connect later
       }
-      
+
       return false;
     }
   } catch (error) {
@@ -459,8 +509,8 @@ async function startPythonBackend(): Promise<boolean> {
     dialog.showErrorBox(
       'Erro ao iniciar backend',
       `${backendError}\n\n` +
-        'Verifique se as dependências Python estão instaladas:\n' +
-        `cd "${voiceEnginePath}" && pip install -r requirements.txt`
+      'Verifique se as dependências Python estão instaladas:\n' +
+      `cd "${voiceEnginePath}" && pip install -r requirements.txt`
     );
     return false;
   }
@@ -542,16 +592,16 @@ function checkModelsExist(): { whisperReady: boolean; kokoroReady: boolean; mode
   const modelsDir = join(app.getPath('userData'), 'models');
   const whisperDir = join(modelsDir, 'whisper');
   const kokoroDir = join(modelsDir, 'kokoro');
-  
+
   logMessage('info', `Checking models in: ${modelsDir}`);
-  
+
   // Check for whisper model files
   let whisperReady = false;
   if (existsSync(whisperDir)) {
     try {
       const { readdirSync } = require('fs');
       const files = readdirSync(whisperDir, { recursive: true }) as string[];
-      whisperReady = files.some((f: string) => 
+      whisperReady = files.some((f: string) =>
         f.endsWith('.bin') || f.endsWith('.ct2') || f.endsWith('.onnx')
       );
       logMessage('info', `Whisper dir exists, model ready: ${whisperReady}, files: ${files.length}`);
@@ -562,14 +612,14 @@ function checkModelsExist(): { whisperReady: boolean; kokoroReady: boolean; mode
   } else {
     logMessage('info', `Whisper dir does not exist: ${whisperDir}`);
   }
-  
+
   // Check for kokoro model files
   let kokoroReady = false;
   if (existsSync(kokoroDir)) {
     try {
       const { readdirSync } = require('fs');
       const files = readdirSync(kokoroDir, { recursive: true }) as string[];
-      kokoroReady = files.some((f: string) => 
+      kokoroReady = files.some((f: string) =>
         f.endsWith('.pth') || f.endsWith('.pt') || f.endsWith('.bin') || f.endsWith('.onnx')
       );
       logMessage('info', `Kokoro dir exists, model ready: ${kokoroReady}, files: ${files.length}`);
@@ -580,7 +630,7 @@ function checkModelsExist(): { whisperReady: boolean; kokoroReady: boolean; mode
   } else {
     logMessage('info', `Kokoro dir does not exist: ${kokoroDir}`);
   }
-  
+
   logMessage('info', `Models check result: whisper=${whisperReady}, kokoro=${kokoroReady}`);
   return { whisperReady, kokoroReady, modelsDir };
 }
@@ -593,7 +643,7 @@ async function downloadModels(
 ): Promise<{ success: boolean; error?: string }> {
   try {
     onProgress('checking', 5, 'Verificando backend...');
-    
+
     // Ensure backend is running - give it more time (60s) on first run
     const isBackendUp = await waitForBackendReady(60000);
     if (!isBackendUp) {
@@ -614,30 +664,30 @@ async function downloadModels(
         return { success: false, error: 'Backend não está respondendo. Verifique os logs.' };
       }
     }
-    
+
     onProgress('dependencies', 15, 'Iniciando download dos modelos...');
-    
+
     // Call the models/download endpoint
     const response = await fetch(`${PYTHON_BACKEND_URL}/models/download`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(600000), // 10 minute timeout for downloads
     });
-    
+
     if (!response.ok) {
       const errorText = await response.text();
       return { success: false, error: `Download falhou: ${errorText}` };
     }
-    
+
     const result = await response.json();
-    
+
     if (result.whisperReady && result.kokoroReady) {
       onProgress('complete', 100, 'Modelos baixados com sucesso!');
       return { success: true };
     } else {
-      return { 
-        success: false, 
-        error: `Modelos não prontos: Whisper=${result.whisperReady}, Kokoro=${result.kokoroReady}` 
+      return {
+        success: false,
+        error: `Modelos não prontos: Whisper=${result.whisperReady}, Kokoro=${result.kokoroReady}`
       };
     }
   } catch (error) {
@@ -665,10 +715,10 @@ function setupIpcHandlers(): void {
   ipcMain.handle('restart-backend', async () => {
     logMessage('info', 'Restart backend requested via IPC');
     stopPythonBackend();
-    
+
     // Wait a bit for cleanup
     await new Promise((resolve) => setTimeout(resolve, 1000));
-    
+
     const success = await startPythonBackend();
     return { success, error: backendError };
   });
@@ -677,7 +727,7 @@ function setupIpcHandlers(): void {
   ipcMain.handle('get-logs-path', () => {
     return join(app.getPath('userData'), 'logs', 'backend.log');
   });
-  
+
   // Check if this is first run (models not downloaded)
   ipcMain.handle('check-first-run', () => {
     const modelsStatus = checkModelsExist();
@@ -688,72 +738,72 @@ function setupIpcHandlers(): void {
       modelsStatus,
     };
   });
-  
+
   // Start download process
   ipcMain.handle('start-download', async () => {
     logMessage('info', 'Download started via IPC');
-    
+
     const sendProgress = (stage: string, percentage: number, message: string) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('download-progress', { stage, percentage, message });
       }
     };
-    
+
     // Initial system check
     sendProgress('checking', 5, 'Verificando sistema...');
     await new Promise(r => setTimeout(r, 300));
-    
+
     // Check Python availability
     const python = isPythonAvailable();
     if (!python.available) {
       sendProgress('error', 0, 'Python 3.8+ não encontrado. Instale Python e reinicie.');
       return { success: false, error: 'Python não encontrado' };
     }
-    
+
     sendProgress('checking', 8, `Python encontrado: ${python.version}`);
     await new Promise(r => setTimeout(r, 300));
-    
+
     // Check Python dependencies FIRST
     const voiceEnginePath = getVoiceEnginePath();
     logMessage('info', `Voice engine path for download: ${voiceEnginePath}`);
     sendProgress('dependencies', 10, 'Verificando dependências Python...');
-    
+
     const depsCheck = checkPythonDependencies(python.command, voiceEnginePath);
-    
+
     if (!depsCheck.installed) {
       logMessage('info', `Dependencies missing: ${depsCheck.error}`);
-      
+
       // Show which dependencies are missing
       if (depsCheck.missingDeps && depsCheck.missingDeps.length > 0) {
         sendProgress('dependencies', 12, `Faltando: ${depsCheck.missingDeps.join(', ')}`);
       } else {
         sendProgress('dependencies', 12, 'Instalando dependências Python...');
       }
-      
+
       await new Promise(r => setTimeout(r, 500));
       sendProgress('dependencies', 15, 'Baixando FastAPI, Whisper, Kokoro... (pode demorar)');
-      
+
       // Use the improved installPythonDependencies function
       const installed = await installPythonDependencies(python.command, voiceEnginePath);
-      
+
       if (!installed) {
         sendProgress('error', 0, 'Falha ao instalar dependências. Veja instruções no terminal.');
         return { success: false, error: 'Falha ao instalar dependências Python' };
       }
-      
+
       sendProgress('dependencies', 18, 'Verificando instalação...');
     }
-    
+
     sendProgress('dependencies', 20, 'Dependências OK');
     await new Promise(r => setTimeout(r, 300));
-    
+
     // Check if backend is running, start if needed
     sendProgress('backend', 22, 'Verificando backend...');
-    
+
     if (!pythonProcess || pythonProcess.exitCode !== null) {
       logMessage('info', 'Backend not running, starting...');
       sendProgress('backend', 24, 'Iniciando backend Python...');
-      
+
       const started = await startPythonBackend();
       if (!started) {
         const errorMsg = backendError || 'Falha ao iniciar backend';
@@ -761,15 +811,15 @@ function setupIpcHandlers(): void {
         return { success: false, error: errorMsg };
       }
     }
-    
+
     sendProgress('backend', 28, 'Backend pronto');
     await new Promise(r => setTimeout(r, 300));
-    
+
     // Start model download
     sendProgress('whisper', 30, 'Iniciando download do Whisper (~1GB)...');
-    
+
     const result = await downloadModels(sendProgress);
-    
+
     if (result.success) {
       sendProgress('complete', 100, 'Instalação completa!');
       return { success: true };
@@ -778,7 +828,7 @@ function setupIpcHandlers(): void {
       return { success: false, error: result.error };
     }
   });
-  
+
   // Get loading progress (for subsequent runs)
   ipcMain.handle('check-backend-ready', async () => {
     try {
@@ -786,7 +836,7 @@ function setupIpcHandlers(): void {
         method: 'GET',
         signal: AbortSignal.timeout(5000),
       });
-      
+
       if (response.ok) {
         const data = await response.json();
         return { ready: data.status === 'ok', status: data };
