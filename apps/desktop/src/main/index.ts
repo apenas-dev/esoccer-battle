@@ -219,8 +219,79 @@ function checkPythonDependencies(pythonCmd: string, voiceEnginePath: string): { 
 }
 
 /**
+ * Get path to the Python venv in the user-writable data directory
+ * This avoids permission issues with C:\Program Files on Windows
+ */
+function getVenvPath(): string {
+  return join(app.getPath('userData'), 'python-env');
+}
+
+/**
+ * Get the Python executable path inside the venv (platform-aware)
+ */
+function getVenvPythonCmd(): string {
+  const venvPath = getVenvPath();
+  return process.platform === 'win32'
+    ? join(venvPath, 'Scripts', 'python.exe')
+    : join(venvPath, 'bin', 'python');
+}
+
+/**
+ * Create a Python venv if it does not exist
+ * Uses the system Python found by isPythonAvailable()
+ */
+function ensureVenv(systemPythonCmd: string): boolean {
+  const venvPath = getVenvPath();
+  const venvPython = getVenvPythonCmd();
+
+  if (existsSync(venvPython)) {
+    logMessage('info', `Venv already exists at: ${venvPath}`);
+    return true;
+  }
+
+  logMessage('info', `Creating venv at: ${venvPath}`);
+  try {
+    execSync(`"${systemPythonCmd}" -m venv "${venvPath}"`, {
+      encoding: 'utf8',
+      timeout: 60000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    logMessage('info', 'Venv created successfully');
+    return true;
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    logMessage('error', `Failed to create venv: ${errorMsg}`);
+    return false;
+  }
+}
+
+/**
+ * Upgrade pip inside the venv to ensure it supports modern binary wheels
+ * Critical: old pip tries to compile numpy/torch from source and fails
+ */
+function upgradePipInVenv(): boolean {
+  const venvPython = getVenvPythonCmd();
+  logMessage('info', 'Upgrading pip inside venv...');
+
+  try {
+    execSync(`"${venvPython}" -m pip install --upgrade pip`, {
+      encoding: 'utf8',
+      timeout: 120000,
+      env: { ...process.env, PIP_NO_INPUT: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    logMessage('info', 'Pip upgraded successfully');
+    return true;
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    logMessage('warn', `Pip upgrade failed (continuing anyway): ${errorMsg}`);
+    return false;
+  }
+}
+
+/**
  * Build a consistent Python environment for subprocess execution
- * Disables interactive prompts and keyring to prevent hangs on Windows
+ * Uses the venv Python and disables interactive prompts
  */
 function buildPythonEnv(voiceEnginePath: string): NodeJS.ProcessEnv {
   return {
@@ -230,116 +301,72 @@ function buildPythonEnv(voiceEnginePath: string): NodeJS.ProcessEnv {
     // Disable pip keyring and prompts (prevents Windows hangs)
     PIP_NO_INPUT: '1',
     PYTHON_KEYRING_BACKEND: 'keyring.backends.null.Keyring',
+    // Use the venv
+    VIRTUAL_ENV: getVenvPath(),
   };
 }
 
 /**
- * Get platform-specific pip installation strategies
- * Windows: system-wide first (no --user needed), no --break-system-packages
- * Linux: --user with --break-system-packages for modern distros
+ * Install Python dependencies inside the venv
+ * Uses --prefer-binary to avoid compiling packages from source
  */
-function getPipStrategies(pythonCmd: string, requirementsPath: string): string[] {
-  const isWindows = process.platform === 'win32';
-  const noInput = '--no-input';
-
-  if (isWindows) {
-    return [
-      `${pythonCmd} -m pip install ${noInput} -r "${requirementsPath}"`,
-      `${pythonCmd} -m pip install ${noInput} --user -r "${requirementsPath}"`,
-    ];
-  }
-
-  return [
-    `${pythonCmd} -m pip install ${noInput} --user --break-system-packages -r "${requirementsPath}"`,
-    `${pythonCmd} -m pip install ${noInput} --user -r "${requirementsPath}"`,
-    `${pythonCmd} -m pip install ${noInput} -r "${requirementsPath}"`,
-  ];
-}
-
-/**
- * Try to install Python dependencies
- * Uses platform-aware strategies and non-interactive mode
- */
-async function installPythonDependencies(pythonCmd: string, voiceEnginePath: string): Promise<boolean> {
-  logMessage('info', 'Attempting to install Python dependencies...');
+async function installPythonDependencies(systemPythonCmd: string, voiceEnginePath: string): Promise<boolean> {
+  logMessage('info', 'Starting Python dependency installation via venv...');
 
   const requirementsPath = join(voiceEnginePath, 'requirements.txt');
-
   if (!existsSync(requirementsPath)) {
     logMessage('error', `requirements.txt not found at: ${requirementsPath}`);
     return false;
   }
 
+  // Step 1: Create venv
+  if (!ensureVenv(systemPythonCmd)) {
+    logMessage('error', 'Failed to create Python virtual environment');
+    return false;
+  }
+
+  const venvPython = getVenvPythonCmd();
   const pipEnv = buildPythonEnv(voiceEnginePath);
 
-  // First, try to upgrade pip (ignore errors)
-  logMessage('info', 'Attempting to upgrade pip...');
-  const upgradeStrategies = process.platform === 'win32'
-    ? [`${pythonCmd} -m pip install --no-input --upgrade pip`]
-    : [
-      `${pythonCmd} -m pip install --no-input --user --break-system-packages --upgrade pip`,
-      `${pythonCmd} -m pip install --no-input --user --upgrade pip`,
-    ];
+  // Step 2: Upgrade pip (critical to get binary wheel support)
+  upgradePipInVenv();
 
-  for (const upgradeCmd of upgradeStrategies) {
-    try {
-      execSync(upgradeCmd, {
-        encoding: 'utf8',
-        timeout: 60000,
-        cwd: voiceEnginePath,
-        env: pipEnv,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      logMessage('info', 'Pip upgrade successful');
-      break;
-    } catch {
-      // Continue to next strategy
+  // Step 3: Install dependencies with --prefer-binary
+  const pipCmd = `"${venvPython}" -m pip install --prefer-binary -r "${requirementsPath}"`;
+  logMessage('info', `Installing dependencies: ${pipCmd}`);
+
+  try {
+    execSync(pipCmd, {
+      encoding: 'utf8',
+      timeout: 900000, // 15 min timeout (torch + whisper are large)
+      cwd: voiceEnginePath,
+      env: pipEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    logMessage('info', 'Pip install completed, verifying...');
+
+    // Verify installation
+    const verifyResult = checkPythonDependencies(venvPython, voiceEnginePath);
+    if (verifyResult.installed) {
+      logMessage('info', 'Python dependencies installed and verified successfully');
+      return true;
+    } else {
+      logMessage('warn', `Install completed but verification failed: ${verifyResult.error}`);
     }
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    logMessage('error', `Pip install failed: ${errorMsg}`);
   }
 
-  // Try each installation strategy
-  const installStrategies = getPipStrategies(pythonCmd, requirementsPath);
-
-  for (let i = 0; i < installStrategies.length; i++) {
-    const pipCmd = installStrategies[i];
-    logMessage('info', `Install strategy ${i + 1}/${installStrategies.length}: ${pipCmd}`);
-
-    try {
-      execSync(pipCmd, {
-        encoding: 'utf8',
-        timeout: 900000, // 15 minute timeout (large packages like whisper ~1GB)
-        cwd: voiceEnginePath,
-        env: pipEnv,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-
-      logMessage('info', `Strategy ${i + 1} completed, verifying installation...`);
-
-      // Verify installation was successful
-      const verifyResult = checkPythonDependencies(pythonCmd, voiceEnginePath);
-      if (verifyResult.installed) {
-        logMessage('info', 'Python dependencies installed and verified successfully');
-        return true;
-      } else {
-        logMessage('warn', `Strategy ${i + 1} installed but verification failed: ${verifyResult.error}`);
-        // Continue to next strategy
-      }
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      logMessage('warn', `Strategy ${i + 1} failed: ${errorMsg}`);
-      // Continue to next strategy
-    }
-  }
-
-  // All strategies failed
-  logMessage('error', 'All installation strategies failed');
+  // Fallback error
+  logMessage('error', 'Dependency installation failed');
   dialog.showErrorBox(
     'Falha na Instalação de Dependências',
     `Não foi possível instalar as dependências Python automaticamente.\n\n` +
     `Tente executar manualmente em um terminal:\n\n` +
-    `cd "${voiceEnginePath}"\n` +
-    `${pythonCmd} -m pip install --no-input -r requirements.txt\n\n` +
-    `Se o erro persistir, verifique se você tem permissão para instalar pacotes Python.`
+    `"${venvPython}" -m pip install --prefer-binary -r "${requirementsPath}"\n\n` +
+    `Se o erro persistir, verifique se você tem Python 3.8+ instalado corretamente.`
   );
   return false;
 }
@@ -381,9 +408,11 @@ async function startPythonBackend(): Promise<boolean> {
     return false;
   }
 
-  // Check if dependencies are installed
-  logMessage('info', `Checking Python dependencies with command: ${python.command}`);
-  const depsCheck = checkPythonDependencies(python.command, voiceEnginePath);
+  // Check if dependencies are installed (use venv python if available)
+  const venvPython = getVenvPythonCmd();
+  const effectivePythonCmd = existsSync(venvPython) ? venvPython : python.command;
+  logMessage('info', `Checking Python dependencies with: ${effectivePythonCmd}`);
+  const depsCheck = checkPythonDependencies(effectivePythonCmd, voiceEnginePath);
 
   if (!depsCheck.installed) {
     logMessage('info', `Dependencies not installed: ${depsCheck.error}`);
@@ -405,8 +434,7 @@ async function startPythonBackend(): Promise<boolean> {
     if (shouldInstall === 0) {
       const installed = await installPythonDependencies(python.command, voiceEnginePath);
       if (!installed) {
-        backendError = 'Falha ao instalar dependências Python. Execute manualmente:\n' +
-          `cd "${voiceEnginePath}" && pip install -r requirements.txt`;
+        backendError = 'Falha ao instalar dependências Python.';
         dialog.showErrorBox('Erro de Instalação', backendError);
         return false;
       }
@@ -430,18 +458,23 @@ async function startPythonBackend(): Promise<boolean> {
       logMessage('info', `Created models directory: ${modelsDir}`);
     }
 
+    // Use venv python to run backend
+    const venvPython = getVenvPythonCmd();
+    const backendPythonCmd = existsSync(venvPython) ? venvPython : python.command;
+    logMessage('info', `Using Python for backend: ${backendPythonCmd}`);
+
     const pythonArgs = ['-m', 'esoccer_voice.api.main'];
     const env = {
       ...buildPythonEnv(voiceEnginePath),
       ESOCCER_MODELS_DIR: modelsDir,  // Pass writable models directory to Python
     };
 
-    logMessage('info', `Command: ${python.command} ${pythonArgs.join(' ')}`);
+    logMessage('info', `Command: ${backendPythonCmd} ${pythonArgs.join(' ')}`);
     logMessage('info', `CWD: ${voiceEnginePath}`);
     logMessage('info', `PYTHONPATH: ${voiceEnginePath}`);
     logMessage('info', `ESOCCER_MODELS_DIR: ${modelsDir}`);
 
-    pythonProcess = spawn(python.command, pythonArgs, {
+    pythonProcess = spawn(backendPythonCmd, pythonArgs, {
       cwd: voiceEnginePath,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -763,12 +796,14 @@ function setupIpcHandlers(): void {
     sendProgress('checking', 8, `Python encontrado: ${python.version}`);
     await new Promise(r => setTimeout(r, 300));
 
-    // Check Python dependencies FIRST
+    // Check Python dependencies using venv if available
     const voiceEnginePath = getVoiceEnginePath();
     logMessage('info', `Voice engine path for download: ${voiceEnginePath}`);
     sendProgress('dependencies', 10, 'Verificando dependências Python...');
 
-    const depsCheck = checkPythonDependencies(python.command, voiceEnginePath);
+    const venvPython = getVenvPythonCmd();
+    const checkCmd = existsSync(venvPython) ? venvPython : python.command;
+    const depsCheck = checkPythonDependencies(checkCmd, voiceEnginePath);
 
     if (!depsCheck.installed) {
       logMessage('info', `Dependencies missing: ${depsCheck.error}`);
@@ -781,9 +816,10 @@ function setupIpcHandlers(): void {
       }
 
       await new Promise(r => setTimeout(r, 500));
+      sendProgress('dependencies', 14, 'Criando ambiente virtual Python...');
       sendProgress('dependencies', 15, 'Baixando FastAPI, Whisper, Kokoro... (pode demorar)');
 
-      // Use the improved installPythonDependencies function
+      // Install dependencies via venv
       const installed = await installPythonDependencies(python.command, voiceEnginePath);
 
       if (!installed) {
