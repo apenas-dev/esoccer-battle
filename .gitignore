@@ -12,6 +12,8 @@ apps/desktop/dist-electron/
 apps/desktop/playwright-report/
 backend/models/
 backend/voice-engine/models/
+apps/desktop/python-standalone/
+apps/desktop/.python-download-tmp/
 *.AppImage
 *.deb
 *.tar.gz

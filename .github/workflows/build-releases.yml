@@ -27,6 +27,10 @@ jobs:
         working-directory: apps/desktop
         run: npm install
 
+      - name: Prepare Standalone Python
+        working-directory: apps/desktop
+        run: npm run prepare:python
+
       - name: Build Windows Executable
         working-directory: apps/desktop
         run: npm run build && npx electron-builder --win

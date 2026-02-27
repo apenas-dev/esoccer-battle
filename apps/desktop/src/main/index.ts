@@ -89,17 +89,30 @@ async function waitForBackendReady(timeoutMs: number = 30000): Promise<boolean> 
 }
 
 /**
- * Check if Python is installed and available
- * On Windows, tries 'py' launcher first (bypasses Microsoft Store alias)
- * Uses short timeout to avoid hanging on stub executables
+ * Get the Python executable command.
+ * Windows (production): uses embedded standalone Python from extraResources.
+ * Windows (dev): uses standalone Python from local python-standalone/ dir.
+ * Linux: falls back to system Python (python3 or python).
  */
-function isPythonAvailable(): { available: boolean; command: string; version?: string } {
+function getPythonCmd(): string {
   const isWindows = process.platform === 'win32';
-  const pythonCommands = isWindows
-    ? ['py', 'python', 'python3']
-    : ['python3', 'python'];
 
-  for (const cmd of pythonCommands) {
+  if (isWindows) {
+    // Embedded standalone Python (pre-built with all deps)
+    const embeddedPath = is.dev
+      ? join(__dirname, '../../../../apps/desktop/python-standalone/python/python.exe')
+      : join(process.resourcesPath, 'python-standalone', 'python', 'python.exe');
+
+    if (existsSync(embeddedPath)) {
+      logMessage('info', `Using embedded Python: ${embeddedPath}`);
+      return embeddedPath;
+    }
+
+    logMessage('warn', `Embedded Python not found at: ${embeddedPath}`);
+  }
+
+  // Linux fallback: find system Python
+  for (const cmd of ['python3', 'python']) {
     try {
       const version = execSync(`${cmd} --version`, {
         encoding: 'utf8',
@@ -107,21 +120,16 @@ function isPythonAvailable(): { available: boolean; command: string; version?: s
         stdio: ['ignore', 'pipe', 'pipe'],
       }).trim();
 
-      // Validate it's real Python (not MS Store stub)
-      if (!version.toLowerCase().startsWith('python')) {
-        logMessage('warn', `Command '${cmd}' returned unexpected output: ${version}`);
-        continue;
+      if (version.toLowerCase().startsWith('python')) {
+        logMessage('info', `Using system Python: ${cmd} (${version})`);
+        return cmd;
       }
-
-      logMessage('info', `Found Python: ${cmd} (${version})`);
-      return { available: true, command: cmd, version };
     } catch {
-      // Try next command
+      // Try next
     }
   }
 
-  logMessage('error', 'Python not found in system PATH');
-  return { available: false, command: '' };
+  return '';
 }
 
 /**
@@ -129,51 +137,26 @@ function isPythonAvailable(): { available: boolean; command: string; version?: s
  */
 function getVoiceEnginePath(): string {
   if (is.dev) {
-    // Development: use relative path from project root
     return join(__dirname, '../../../../backend/voice-engine');
-  } else {
-    // Production: use extraResources path
-    return join(process.resourcesPath, 'voice-engine');
   }
+  return join(process.resourcesPath, 'voice-engine');
 }
 
 /**
- * Check if Python dependencies are installed for the voice-engine
- * IMPORTANT: Must check actual external dependencies (fastapi, uvicorn, etc.)
- * not just the local esoccer_voice module.
- * Uses the SAME environment that will be used for execution to avoid false positives.
+ * Check if critical Python dependencies are importable
  */
 function checkPythonDependencies(pythonCmd: string, voiceEnginePath: string): { installed: boolean; error?: string; missingDeps?: string[] } {
-  // List of critical dependencies that MUST be installed
-  const criticalDependencies = [
-    'fastapi',
-    'uvicorn',
-    'pydub',
-    'numpy',
-    'faster_whisper',  // Critical for STT
-  ];
-
+  const criticalDependencies = ['fastapi', 'uvicorn', 'pydub', 'numpy', 'faster_whisper'];
   const missingDeps: string[] = [];
-
-  // Build the same environment that will be used for execution
   const checkEnv = buildPythonEnv(voiceEnginePath);
-
-  // Escape backslashes for safe injection in Python -c strings (Windows paths)
   const safePath = voiceEnginePath.replace(/\\/g, '\\\\');
 
   try {
-    // Check each critical dependency individually with the SAME env as execution
     for (const dep of criticalDependencies) {
       try {
         execSync(
-          `${pythonCmd} -c "import ${dep}; print('${dep} OK')"`,
-          {
-            encoding: 'utf8',
-            timeout: 15000,
-            cwd: voiceEnginePath,
-            env: checkEnv,
-            stdio: ['ignore', 'pipe', 'pipe'],
-          }
+          `"${pythonCmd}" -c "import ${dep}; print('${dep} OK')"`,
+          { encoding: 'utf8', timeout: 15000, cwd: voiceEnginePath, env: checkEnv, stdio: ['ignore', 'pipe', 'pipe'] }
         );
         logMessage('info', `Dependency check: ${dep} - OK`);
       } catch {
@@ -183,219 +166,64 @@ function checkPythonDependencies(pythonCmd: string, voiceEnginePath: string): { 
     }
 
     if (missingDeps.length > 0) {
-      return {
-        installed: false,
-        error: `Dependências não encontradas: ${missingDeps.join(', ')}`,
-        missingDeps
-      };
+      return { installed: false, error: `Dependências não encontradas: ${missingDeps.join(', ')}`, missingDeps };
     }
 
-    // Also verify the esoccer_voice module structure (with same env)
+    // Verify esoccer_voice module
     try {
       execSync(
-        `${pythonCmd} -c "import sys; sys.path.insert(0, '${safePath}'); from esoccer_voice.api import main; print('esoccer_voice OK')"`,
-        {
-          encoding: 'utf8',
-          timeout: 15000,
-          cwd: voiceEnginePath,
-          env: checkEnv,
-          stdio: ['ignore', 'pipe', 'pipe'],
-        }
+        `"${pythonCmd}" -c "import sys; sys.path.insert(0, '${safePath}'); from esoccer_voice.api import main; print('esoccer_voice OK')"`,
+        { encoding: 'utf8', timeout: 15000, cwd: voiceEnginePath, env: checkEnv, stdio: ['ignore', 'pipe', 'pipe'] }
       );
       logMessage('info', 'esoccer_voice module check: OK');
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      logMessage('warn', `esoccer_voice module check failed: ${errorMsg}`);
       return { installed: false, error: `Módulo esoccer_voice não carrega: ${errorMsg}` };
     }
 
-    logMessage('info', 'Python dependencies check passed (all critical deps verified)');
+    logMessage('info', 'Python dependencies check passed');
     return { installed: true };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    logMessage('warn', `Python dependencies check failed: ${errorMsg}`);
     return { installed: false, error: errorMsg };
   }
 }
 
 /**
- * Get path to the Python venv in the user-writable data directory
- * This avoids permission issues with C:\Program Files on Windows
- */
-function getVenvPath(): string {
-  return join(app.getPath('userData'), 'python-env');
-}
-
-/**
- * Get the Python executable path inside the venv (platform-aware)
- */
-function getVenvPythonCmd(): string {
-  const venvPath = getVenvPath();
-  return process.platform === 'win32'
-    ? join(venvPath, 'Scripts', 'python.exe')
-    : join(venvPath, 'bin', 'python');
-}
-
-/**
- * Create a Python venv if it does not exist
- * Uses the system Python found by isPythonAvailable()
- */
-function ensureVenv(systemPythonCmd: string): boolean {
-  const venvPath = getVenvPath();
-  const venvPython = getVenvPythonCmd();
-
-  if (existsSync(venvPython)) {
-    logMessage('info', `Venv already exists at: ${venvPath}`);
-    return true;
-  }
-
-  logMessage('info', `Creating venv at: ${venvPath}`);
-  try {
-    execSync(`"${systemPythonCmd}" -m venv "${venvPath}"`, {
-      encoding: 'utf8',
-      timeout: 60000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    logMessage('info', 'Venv created successfully');
-    return true;
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    logMessage('error', `Failed to create venv: ${errorMsg}`);
-    return false;
-  }
-}
-
-/**
- * Upgrade pip inside the venv to ensure it supports modern binary wheels
- * Critical: old pip tries to compile numpy/torch from source and fails
- */
-function upgradePipInVenv(): boolean {
-  const venvPython = getVenvPythonCmd();
-  logMessage('info', 'Upgrading pip inside venv...');
-
-  try {
-    execSync(`"${venvPython}" -m pip install --upgrade pip`, {
-      encoding: 'utf8',
-      timeout: 120000,
-      env: { ...process.env, PIP_NO_INPUT: '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    logMessage('info', 'Pip upgraded successfully');
-    return true;
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    logMessage('warn', `Pip upgrade failed (continuing anyway): ${errorMsg}`);
-    return false;
-  }
-}
-
-/**
- * Build a consistent Python environment for subprocess execution
- * Uses the venv Python and disables interactive prompts
+ * Build environment variables for Python subprocess execution
  */
 function buildPythonEnv(voiceEnginePath: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
     PYTHONPATH: voiceEnginePath,
     PYTHONUNBUFFERED: '1',
-    // Disable pip keyring and prompts (prevents Windows hangs)
     PIP_NO_INPUT: '1',
     PYTHON_KEYRING_BACKEND: 'keyring.backends.null.Keyring',
-    // Use the venv
-    VIRTUAL_ENV: getVenvPath(),
   };
-}
-
-/**
- * Install Python dependencies inside the venv
- * Uses --prefer-binary to avoid compiling packages from source
- */
-async function installPythonDependencies(systemPythonCmd: string, voiceEnginePath: string): Promise<boolean> {
-  logMessage('info', 'Starting Python dependency installation via venv...');
-
-  const requirementsPath = join(voiceEnginePath, 'requirements.txt');
-  if (!existsSync(requirementsPath)) {
-    logMessage('error', `requirements.txt not found at: ${requirementsPath}`);
-    return false;
-  }
-
-  // Step 1: Create venv
-  if (!ensureVenv(systemPythonCmd)) {
-    logMessage('error', 'Failed to create Python virtual environment');
-    return false;
-  }
-
-  const venvPython = getVenvPythonCmd();
-  const pipEnv = buildPythonEnv(voiceEnginePath);
-
-  // Step 2: Upgrade pip (critical to get binary wheel support)
-  upgradePipInVenv();
-
-  // Step 3: Install dependencies with --prefer-binary
-  const pipCmd = `"${venvPython}" -m pip install --prefer-binary -r "${requirementsPath}"`;
-  logMessage('info', `Installing dependencies: ${pipCmd}`);
-
-  try {
-    execSync(pipCmd, {
-      encoding: 'utf8',
-      timeout: 900000, // 15 min timeout (torch + whisper are large)
-      cwd: voiceEnginePath,
-      env: pipEnv,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    logMessage('info', 'Pip install completed, verifying...');
-
-    // Verify installation
-    const verifyResult = checkPythonDependencies(venvPython, voiceEnginePath);
-    if (verifyResult.installed) {
-      logMessage('info', 'Python dependencies installed and verified successfully');
-      return true;
-    } else {
-      logMessage('warn', `Install completed but verification failed: ${verifyResult.error}`);
-    }
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    logMessage('error', `Pip install failed: ${errorMsg}`);
-  }
-
-  // Fallback error
-  logMessage('error', 'Dependency installation failed');
-  dialog.showErrorBox(
-    'Falha na Instalação de Dependências',
-    `Não foi possível instalar as dependências Python automaticamente.\n\n` +
-    `Tente executar manualmente em um terminal:\n\n` +
-    `"${venvPython}" -m pip install --prefer-binary -r "${requirementsPath}"\n\n` +
-    `Se o erro persistir, verifique se você tem Python 3.8+ instalado corretamente.`
-  );
-  return false;
 }
 
 /**
  * Start the Python backend process
  */
 async function startPythonBackend(): Promise<boolean> {
-  const python = isPythonAvailable();
+  const pythonCmd = getPythonCmd();
 
-  if (!python.available) {
-    backendError = 'Python 3.8+ não encontrado no sistema. Instale Python e reinicie o aplicativo.';
+  if (!pythonCmd) {
+    backendError = 'Python não encontrado. Verifique a instalação do aplicativo.';
+    logMessage('error', backendError);
     dialog.showErrorBox(
       'Python não encontrado',
-      'O E-Soccer Battle requer Python 3.8+ para funcionar.\n\n' +
-      'Por favor, instale Python em:\n' +
-      '- Windows: https://www.python.org/downloads/\n' +
-      '- Linux: sudo apt install python3 python3-pip python3-venv\n\n' +
-      'Após instalar, reinicie o aplicativo.'
+      process.platform === 'win32'
+        ? 'O Python embutido não foi encontrado. Reinstale o aplicativo.'
+        : 'Python 3.10+ não encontrado.\nInstale com: sudo apt install python3 python3-pip'
     );
     return false;
   }
 
   const voiceEnginePath = getVoiceEnginePath();
   logMessage('info', `Voice engine path: ${voiceEnginePath}`);
+  logMessage('info', `Python command: ${pythonCmd}`);
   logMessage('info', `Running in ${is.dev ? 'development' : 'production'} mode`);
-  logMessage('info', `resourcesPath: ${process.resourcesPath}`);
-  logMessage('info', `userData: ${app.getPath('userData')}`);
-  logMessage('info', `home: ${app.getPath('home')}`);
 
   if (!existsSync(voiceEnginePath)) {
     backendError = `Backend não encontrado em: ${voiceEnginePath}`;
@@ -408,100 +236,66 @@ async function startPythonBackend(): Promise<boolean> {
     return false;
   }
 
-  // Check if dependencies are installed (use venv python if available)
-  const venvPython = getVenvPythonCmd();
-  const effectivePythonCmd = existsSync(venvPython) ? venvPython : python.command;
-  logMessage('info', `Checking Python dependencies with: ${effectivePythonCmd}`);
-  const depsCheck = checkPythonDependencies(effectivePythonCmd, voiceEnginePath);
-
+  // Verify dependencies are available
+  const depsCheck = checkPythonDependencies(pythonCmd, voiceEnginePath);
   if (!depsCheck.installed) {
-    logMessage('info', `Dependencies not installed: ${depsCheck.error}`);
-    if (depsCheck.missingDeps) {
-      logMessage('info', `Missing dependencies: ${depsCheck.missingDeps.join(', ')}`);
-    }
-    logMessage('info', 'Attempting auto-install...');
-
-    // Show notification to user
-    const shouldInstall = dialog.showMessageBoxSync({
-      type: 'question',
-      buttons: ['Instalar', 'Cancelar'],
-      defaultId: 0,
-      title: 'Instalar Dependências',
-      message: 'As dependências Python do E-Soccer Battle precisam ser instaladas.',
-      detail: 'Isso pode levar alguns minutos na primeira execução.\n\nDeseja instalar agora?'
-    });
-
-    if (shouldInstall === 0) {
-      const installed = await installPythonDependencies(python.command, voiceEnginePath);
-      if (!installed) {
-        backendError = 'Falha ao instalar dependências Python.';
-        dialog.showErrorBox('Erro de Instalação', backendError);
-        return false;
-      }
-    } else {
-      backendError = 'Instalação de dependências cancelada pelo usuário.';
+    logMessage('warn', `Dependencies check failed: ${depsCheck.error}`);
+    // On Windows, deps should be pre-installed — this is a broken install
+    if (process.platform === 'win32') {
+      backendError = `Dependências não encontradas no Python embutido: ${depsCheck.error}`;
+      dialog.showErrorBox('Instalação Incompleta', `${backendError}\n\nReinstale o aplicativo.`);
       return false;
     }
+    // On Linux, user needs to install deps manually
+    backendError = `Dependências faltando: ${depsCheck.error}`;
+    dialog.showErrorBox(
+      'Dependências Faltando',
+      `${backendError}\n\nInstale com:\npip install -r "${join(voiceEnginePath, 'requirements.txt')}"`
+    );
+    return false;
   }
 
   try {
-    // Start Python backend using the module
     logMessage('info', 'Starting Python voice-engine...');
 
-    // Models directory - use app.getPath('userData') for writable storage
-    // This is critical for AppImage which mounts as read-only
+    // Models directory — writable storage (critical for read-only installs)
     const modelsDir = join(app.getPath('userData'), 'models');
-
-    // Ensure models directory exists
     if (!existsSync(modelsDir)) {
       mkdirSync(modelsDir, { recursive: true });
       logMessage('info', `Created models directory: ${modelsDir}`);
     }
 
-    // Use venv python to run backend
-    const venvPython = getVenvPythonCmd();
-    const backendPythonCmd = existsSync(venvPython) ? venvPython : python.command;
-    logMessage('info', `Using Python for backend: ${backendPythonCmd}`);
-
     const pythonArgs = ['-m', 'esoccer_voice.api.main'];
     const env = {
       ...buildPythonEnv(voiceEnginePath),
-      ESOCCER_MODELS_DIR: modelsDir,  // Pass writable models directory to Python
+      ESOCCER_MODELS_DIR: modelsDir,
     };
 
-    logMessage('info', `Command: ${backendPythonCmd} ${pythonArgs.join(' ')}`);
-    logMessage('info', `CWD: ${voiceEnginePath}`);
-    logMessage('info', `PYTHONPATH: ${voiceEnginePath}`);
+    logMessage('info', `Command: ${pythonCmd} ${pythonArgs.join(' ')}`);
     logMessage('info', `ESOCCER_MODELS_DIR: ${modelsDir}`);
 
-    pythonProcess = spawn(backendPythonCmd, pythonArgs, {
+    pythonProcess = spawn(pythonCmd, pythonArgs, {
       cwd: voiceEnginePath,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    // Capture startup errors
-    let startupErrors: string[] = [];
+    const startupErrors: string[] = [];
 
-    // Log stdout
     pythonProcess.stdout?.on('data', (data: Buffer) => {
-      const msg = data.toString().trim();
-      logMessage('info', `[stdout] ${msg}`);
+      logMessage('info', `[stdout] ${data.toString().trim()}`);
     });
 
-    // Log stderr
     pythonProcess.stderr?.on('data', (data: Buffer) => {
       const msg = data.toString().trim();
       logMessage('error', `[stderr] ${msg}`);
       startupErrors.push(msg);
     });
 
-    // Handle process exit
     pythonProcess.on('exit', (code, signal) => {
       logMessage('info', `Process exited with code ${code}, signal ${signal}`);
       if (code !== 0 && code !== null) {
         backendError = `Backend encerrou com erro (código ${code}).\n${startupErrors.slice(-3).join('\n')}`;
-        // Notify renderer about backend failure
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('backend-error', backendError);
         }
@@ -509,42 +303,34 @@ async function startPythonBackend(): Promise<boolean> {
       pythonProcess = null;
     });
 
-    // Handle process error
     pythonProcess.on('error', (err) => {
       backendError = `Erro ao iniciar backend: ${err.message}`;
       logMessage('error', backendError);
       pythonProcess = null;
     });
 
-    // Wait for backend to be ready with health check
-    const isReady = await waitForBackendReady(30000); // 30 second timeout
+    const isReady = await waitForBackendReady(30000);
 
     if (isReady) {
       logMessage('info', 'Python voice-engine started and ready');
       backendError = null;
       return true;
-    } else {
-      backendError = 'Backend iniciou mas não respondeu ao health check.\n' +
-        'Verifique os logs em: ' + join(app.getPath('userData'), 'logs', 'backend.log');
-      logMessage('warn', 'Backend started but health check failed');
-
-      // Check if process is still running
-      if (pythonProcess && pythonProcess.exitCode === null) {
-        logMessage('info', 'Process still running, may connect later');
-        return true; // Let it try to connect later
-      }
-
-      return false;
     }
+
+    backendError = 'Backend iniciou mas não respondeu ao health check.\n' +
+      'Verifique os logs em: ' + join(app.getPath('userData'), 'logs', 'backend.log');
+    logMessage('warn', 'Backend started but health check failed');
+
+    if (pythonProcess && pythonProcess.exitCode === null) {
+      logMessage('info', 'Process still running, may connect later');
+      return true;
+    }
+
+    return false;
   } catch (error) {
     backendError = `Não foi possível iniciar o backend: ${error instanceof Error ? error.message : String(error)}`;
     logMessage('error', backendError);
-    dialog.showErrorBox(
-      'Erro ao iniciar backend',
-      `${backendError}\n\n` +
-      'Verifique se as dependências Python estão instaladas:\n' +
-      `cd "${voiceEnginePath}" && pip install -r requirements.txt`
-    );
+    dialog.showErrorBox('Erro ao iniciar backend', backendError);
     return false;
   }
 }
@@ -772,7 +558,7 @@ function setupIpcHandlers(): void {
     };
   });
 
-  // Start download process
+  // Start download process (models only — deps are pre-installed at build time)
   ipcMain.handle('start-download', async () => {
     logMessage('info', 'Download started via IPC');
 
@@ -782,58 +568,21 @@ function setupIpcHandlers(): void {
       }
     };
 
-    // Initial system check
     sendProgress('checking', 5, 'Verificando sistema...');
     await new Promise(r => setTimeout(r, 300));
 
-    // Check Python availability
-    const python = isPythonAvailable();
-    if (!python.available) {
-      sendProgress('error', 0, 'Python 3.8+ não encontrado. Instale Python e reinicie.');
+    // Verify Python is available
+    const pythonCmd = getPythonCmd();
+    if (!pythonCmd) {
+      sendProgress('error', 0, 'Python não encontrado. Reinstale o aplicativo.');
       return { success: false, error: 'Python não encontrado' };
     }
 
-    sendProgress('checking', 8, `Python encontrado: ${python.version}`);
-    await new Promise(r => setTimeout(r, 300));
-
-    // Check Python dependencies using venv if available
-    const voiceEnginePath = getVoiceEnginePath();
-    logMessage('info', `Voice engine path for download: ${voiceEnginePath}`);
-    sendProgress('dependencies', 10, 'Verificando dependências Python...');
-
-    const venvPython = getVenvPythonCmd();
-    const checkCmd = existsSync(venvPython) ? venvPython : python.command;
-    const depsCheck = checkPythonDependencies(checkCmd, voiceEnginePath);
-
-    if (!depsCheck.installed) {
-      logMessage('info', `Dependencies missing: ${depsCheck.error}`);
-
-      // Show which dependencies are missing
-      if (depsCheck.missingDeps && depsCheck.missingDeps.length > 0) {
-        sendProgress('dependencies', 12, `Faltando: ${depsCheck.missingDeps.join(', ')}`);
-      } else {
-        sendProgress('dependencies', 12, 'Instalando dependências Python...');
-      }
-
-      await new Promise(r => setTimeout(r, 500));
-      sendProgress('dependencies', 14, 'Criando ambiente virtual Python...');
-      sendProgress('dependencies', 15, 'Baixando FastAPI, Whisper, Kokoro... (pode demorar)');
-
-      // Install dependencies via venv
-      const installed = await installPythonDependencies(python.command, voiceEnginePath);
-
-      if (!installed) {
-        sendProgress('error', 0, 'Falha ao instalar dependências. Veja instruções no terminal.');
-        return { success: false, error: 'Falha ao instalar dependências Python' };
-      }
-
-      sendProgress('dependencies', 18, 'Verificando instalação...');
-    }
-
+    sendProgress('checking', 10, 'Python OK');
     sendProgress('dependencies', 20, 'Dependências OK');
     await new Promise(r => setTimeout(r, 300));
 
-    // Check if backend is running, start if needed
+    // Start backend if needed
     sendProgress('backend', 22, 'Verificando backend...');
 
     if (!pythonProcess || pythonProcess.exitCode !== null) {
@@ -851,7 +600,7 @@ function setupIpcHandlers(): void {
     sendProgress('backend', 28, 'Backend pronto');
     await new Promise(r => setTimeout(r, 300));
 
-    // Start model download
+    // Download models
     sendProgress('whisper', 30, 'Iniciando download do Whisper (~1GB)...');
 
     const result = await downloadModels(sendProgress);
