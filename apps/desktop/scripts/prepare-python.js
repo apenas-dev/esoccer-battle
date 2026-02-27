@@ -116,6 +116,34 @@ function extractTarGz(archivePath, destDir) {
     });
 }
 
+/**
+ * Run a pip command with standardised env and logging.
+ * Returns true if the command succeeded, false otherwise.
+ */
+function runPip(args, { throwOnError = true, timeoutMs = 600000 } = {}) {
+    const cmd = `${PIP_CMD} ${args}`;
+    log(`  > ${cmd}`);
+    try {
+        execSync(cmd, {
+            stdio: 'inherit',
+            timeout: timeoutMs,
+            cwd: VOICE_ENGINE_DIR,
+            env: {
+                ...process.env,
+                PIP_NO_INPUT: '1',
+                PYTHON_KEYRING_BACKEND: 'keyring.backends.null.Keyring',
+            },
+        });
+        return true;
+    } catch (err) {
+        if (throwOnError) {
+            throw err;
+        }
+        logError(`pip command failed: ${err.message}`);
+        return false;
+    }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -192,17 +220,9 @@ async function main() {
         }
     }
 
-    // Step 4: Upgrade pip
-    log('Upgrading pip...');
-    try {
-        execSync(`${PIP_CMD} install --upgrade pip`, {
-            stdio: 'inherit',
-            timeout: 120000,
-            env: { ...process.env, PIP_NO_INPUT: '1' },
-        });
-    } catch {
-        log('pip upgrade failed (continuing anyway)');
-    }
+    // Step 4: Upgrade pip + install wheel/setuptools
+    log('Upgrading pip, wheel, setuptools...');
+    runPip('install --upgrade pip wheel setuptools', { throwOnError: false, timeoutMs: 120000 });
 
     // Step 5: Install dependencies
     await installDependencies();
@@ -223,44 +243,103 @@ async function installDependencies() {
     log(`Installing dependencies from ${REQUIREMENTS_FILE}...`);
     log('This may take several minutes (torch, faster-whisper, etc.)...');
 
-    try {
-        execSync(
-            `${PIP_CMD} install --prefer-binary -r "${REQUIREMENTS_FILE}"`,
-            {
-                stdio: 'inherit',
-                timeout: 1800000, // 30 min (torch is large)
-                cwd: VOICE_ENGINE_DIR,
-                env: {
-                    ...process.env,
-                    PIP_NO_INPUT: '1',
-                    PYTHON_KEYRING_BACKEND: 'keyring.backends.null.Keyring',
-                },
-            }
-        );
-        log('Dependencies installed successfully.');
-    } catch (err) {
-        logError(`pip install failed: ${err.message}`);
-        logError('You may need to run this script again or install dependencies manually.');
-        process.exit(1);
-    }
+    // ── Phase 1: Install native packages with --only-binary ──────────────
+    // These packages have C/C++ extensions — we MUST use pre-compiled wheels.
+    // If no wheel exists for this Python version + platform, pip will fail
+    // fast instead of attempting (and failing) to compile from source.
+    log('');
+    log('── Phase 1: Installing native packages (binary-only) ──');
+    const nativePackages = [
+        'numpy',
+        'ctranslate2',
+        'faster-whisper>=1.0.0',
+        'torch>=2.0.0',
+        'torchaudio>=2.0.0',
+        'soundfile>=0.12.1',
+    ];
 
-    // Verify critical dependencies
-    log('Verifying critical dependencies...');
-    const criticalDeps = ['fastapi', 'uvicorn', 'numpy', 'faster_whisper'];
-    for (const dep of criticalDeps) {
+    try {
+        runPip(
+            `install --only-binary=:all: ${nativePackages.join(' ')}`,
+            { timeoutMs: 1200000 } // 20 min (torch is large)
+        );
+        log('Phase 1 complete: native packages installed.');
+    } catch (err) {
+        logError(`Phase 1 failed: ${err.message}`);
+        logError('');
+        logError('This usually means pre-compiled wheels are not available for');
+        logError(`Python ${PYTHON_VERSION} on Windows x86_64. Possible fixes:`);
+        logError('  1. Try a different Python version (e.g. 3.11, 3.12)');
+        logError('  2. Pin ctranslate2 to a version with Windows wheels');
+        logError('  3. Check https://pypi.org/project/ctranslate2/#files');
+        logError('');
+
+        // Fallback: try without --only-binary for ctranslate2 + faster-whisper
+        log('Attempting fallback: installing without --only-binary restriction...');
         try {
-            execSync(`"${PYTHON_EXE}" -c "import ${dep}; print('${dep} OK')"`, {
-                stdio: 'pipe',
-                timeout: 15000,
-            });
-            log(`  ✓ ${dep}`);
-        } catch {
-            logError(`  ✗ ${dep} - FAILED TO IMPORT`);
+            runPip(
+                `install --prefer-binary ${nativePackages.join(' ')}`,
+                { timeoutMs: 1200000 }
+            );
+            log('Fallback succeeded.');
+        } catch (err2) {
+            logError(`Fallback also failed: ${err2.message}`);
             process.exit(1);
         }
     }
 
-    log('All critical dependencies verified.');
+    // ── Phase 2: Install remaining (pure-Python) packages ────────────────
+    log('');
+    log('── Phase 2: Installing remaining packages from requirements.txt ──');
+    try {
+        runPip(
+            `install --prefer-binary -r "${REQUIREMENTS_FILE}"`,
+            { timeoutMs: 600000 } // 10 min
+        );
+        log('Phase 2 complete: all packages installed.');
+    } catch (err) {
+        logError(`Phase 2 (requirements.txt) failed: ${err.message}`);
+        process.exit(1);
+    }
+
+    // ── Phase 3: List installed packages for debugging ───────────────────
+    log('');
+    log('── Installed packages ──');
+    runPip('list --format=columns', { throwOnError: false, timeoutMs: 15000 });
+
+    // ── Phase 4: Verify critical dependencies ────────────────────────────
+    log('');
+    log('── Verifying critical dependencies ──');
+    const criticalDeps = ['fastapi', 'uvicorn', 'numpy', 'faster_whisper'];
+
+    let allOk = true;
+    for (const dep of criticalDeps) {
+        try {
+            const output = execSync(`"${PYTHON_EXE}" -c "import ${dep}; print('${dep}', getattr(${dep}, '__version__', 'OK'))"`, {
+                encoding: 'utf8',
+                timeout: 30000,
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            log(`  ✓ ${output.trim()}`);
+        } catch (err) {
+            const stderr = err.stderr ? err.stderr.toString().trim() : '';
+            logError(`  ✗ ${dep} — FAILED TO IMPORT`);
+            if (stderr) {
+                logError(`    ${stderr.split('\n').slice(-3).join('\n    ')}`);
+            }
+            allOk = false;
+        }
+    }
+
+    if (!allOk) {
+        logError('');
+        logError('One or more critical dependencies failed to import.');
+        logError('The build cannot continue. Check the errors above.');
+        process.exit(1);
+    }
+
+    log('');
+    log('All critical dependencies verified successfully.');
 }
 
 main().catch((err) => {

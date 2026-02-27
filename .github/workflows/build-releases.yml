@@ -29,7 +29,43 @@ jobs:
 
       - name: Prepare Standalone Python
         working-directory: apps/desktop
+        shell: powershell
         run: npm run prepare:python
+
+      - name: Verify Python Dependencies
+        working-directory: apps/desktop
+        shell: powershell
+        run: |
+          $pythonExe = "python-standalone\python\python.exe"
+          Write-Host "Python executable: $pythonExe"
+          & $pythonExe --version
+
+          Write-Host ""
+          Write-Host "=== Installed packages ==="
+          & $pythonExe -m pip list --format=columns
+
+          Write-Host ""
+          Write-Host "=== Import verification ==="
+          $deps = @("fastapi", "uvicorn", "numpy", "faster_whisper", "torch", "pydub", "soundfile")
+          $failed = @()
+          foreach ($dep in $deps) {
+            try {
+              $output = & $pythonExe -c "import $dep; print('OK:', '$dep', getattr($dep, '__version__', ''))" 2>&1
+              Write-Host "[PASS] $dep - $output"
+            } catch {
+              Write-Host "[FAIL] $dep - $_"
+              $failed += $dep
+            }
+          }
+
+          if ($failed.Count -gt 0) {
+            Write-Host ""
+            Write-Host "FAILED dependencies: $($failed -join ', ')"
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "All dependencies verified successfully."
 
       - name: Build Windows Executable
         working-directory: apps/desktop
