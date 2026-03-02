@@ -69,18 +69,22 @@ jobs:
           & "python-standalone\python\python.exe" -m pip list --format=columns
           
           Write-Host "`n--- Import verification ---"
+          $ErrorActionPreference = "Continue"
           $deps = @("fastapi", "uvicorn", "numpy", "ctranslate2", "faster_whisper", "torch", "soundfile", "pydub")
           $failed = @()
           foreach ($dep in $deps) {
-            $result = & "python-standalone\python\python.exe" -c "import $dep; print('$dep', getattr($dep, '__version__', 'OK'))" 2>&1
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "[PASS] $result"
+            $output = & "python-standalone\python\python.exe" -c "import $dep; print('$dep', getattr($dep, '__version__', 'OK'))" 2>&1 | Out-String
+            $exitCode = $LASTEXITCODE
+            $outputClean = $output.Trim()
+            if ($exitCode -eq 0) {
+              Write-Host "[PASS] $outputClean"
             } else {
-              Write-Host "[FAIL] $dep"
-              Write-Host "       $result"
+              Write-Host "[FAIL] $dep (exit code $exitCode)"
+              Write-Host "       $outputClean"
               $failed += $dep
             }
           }
+          $ErrorActionPreference = "Stop"
           
           Write-Host "`n--- build/ directory ---"
           if (Test-Path "build") {
