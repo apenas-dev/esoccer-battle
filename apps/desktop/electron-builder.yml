@@ -29,6 +29,9 @@ extraResources:
       - "**/*"
       - "!**/__pycache__/**"
       - "!**/*.pyc"
+  # MSVC Redistributable for silent install
+  - from: build/vc_redist.x64.exe
+    to: vc_redist.x64.exe
 
 # Windows configuration
 win:
@@ -46,6 +49,7 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   deleteAppDataOnUninstall: true
+  include: build/installer.nsh
 
 portable:
   artifactName: ${productName}-${version}-portable.exe

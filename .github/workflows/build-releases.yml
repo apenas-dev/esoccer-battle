@@ -67,6 +67,14 @@ jobs:
           Write-Host ""
           Write-Host "All dependencies verified successfully."
 
+      - name: Download MSVC Redistributable
+        working-directory: apps/desktop
+        shell: powershell
+        run: |
+          if (!(Test-Path -Path build)) { New-Item -ItemType Directory -Force -Path build }
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "build\vc_redist.x64.exe"
+          Write-Host "Downloaded vc_redist.x64.exe to build directory."
+
       - name: Build Windows Executable
         working-directory: apps/desktop
         run: npm run build && npx electron-builder --win
