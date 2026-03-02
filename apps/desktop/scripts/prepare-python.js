@@ -267,25 +267,12 @@ async function installDependencies() {
     } catch (err) {
         logError(`Phase 1 failed: ${err.message}`);
         logError('');
-        logError('This usually means pre-compiled wheels are not available for');
+        logError('Pre-compiled wheels are not available for');
         logError(`Python ${PYTHON_VERSION} on Windows x86_64. Possible fixes:`);
         logError('  1. Try a different Python version (e.g. 3.11, 3.12)');
         logError('  2. Pin ctranslate2 to a version with Windows wheels');
         logError('  3. Check https://pypi.org/project/ctranslate2/#files');
-        logError('');
-
-        // Fallback: try without --only-binary for ctranslate2 + faster-whisper
-        log('Attempting fallback: installing without --only-binary restriction...');
-        try {
-            runPip(
-                `install --prefer-binary ${nativePackages.join(' ')}`,
-                { timeoutMs: 1200000 }
-            );
-            log('Fallback succeeded.');
-        } catch (err2) {
-            logError(`Fallback also failed: ${err2.message}`);
-            process.exit(1);
-        }
+        process.exit(1);
     }
 
     // ── Phase 2: Install remaining (pure-Python) packages ────────────────
