@@ -11,12 +11,13 @@
  */
 
 import { execSync } from 'child_process';
-import { existsSync, mkdirSync, rmSync, createWriteStream } from 'fs';
+import { existsSync, mkdirSync, rmSync, createWriteStream, readdirSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { pipeline } from 'stream/promises';
 import { createGunzip } from 'zlib';
 import { get as httpsGet } from 'https';
+import os from 'os';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -150,9 +151,28 @@ async function main() {
     const forceFlag = process.argv.includes('--force');
 
     log('=== Standalone Python Preparation ===');
-    log(`Python version: ${PYTHON_VERSION}`);
-    log(`Release: ${RELEASE_TAG}`);
-    log(`Output dir: ${OUTPUT_DIR}`);
+    log('');
+    log('── System Info ──');
+    log(`  OS:       ${os.platform()} ${os.release()} (${os.arch()})`);
+    log(`  Node:     ${process.version}`);
+    log(`  CWD:      ${process.cwd()}`);
+    log(`  Free RAM: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(1)} GB`);
+    try {
+        const diskInfo = execSync('wmic logicaldisk get size,freespace,caption', { encoding: 'utf8', timeout: 5000 }).trim();
+        log(`  Disk:\n    ${diskInfo.split('\n').join('\n    ')}`);
+    } catch { log('  Disk: (could not query)'); }
+    log('');
+    log('── Configuration ──');
+    log(`  Python version:  ${PYTHON_VERSION}`);
+    log(`  Release tag:     ${RELEASE_TAG}`);
+    log(`  Archive:         ${ARCHIVE_NAME}`);
+    log(`  Download URL:    ${DOWNLOAD_URL}`);
+    log(`  Output dir:      ${OUTPUT_DIR}`);
+    log(`  Voice engine:    ${VOICE_ENGINE_DIR}`);
+    log(`  Requirements:    ${REQUIREMENTS_FILE}`);
+    log(`  Requirements exists: ${existsSync(REQUIREMENTS_FILE)}`);
+    log(`  Voice engine exists: ${existsSync(VOICE_ENGINE_DIR)}`);
+    log('');
 
     // Check if already prepared
     if (existsSync(PYTHON_EXE) && !forceFlag) {
@@ -193,6 +213,24 @@ async function main() {
     // Step 2: Extract
     log('Extracting archive...');
     extractTarGz(archivePath, OUTPUT_DIR);
+
+    // List extracted contents for debugging
+    log('── Extracted directory structure (top-level) ──');
+    try {
+        const topLevel = readdirSync(OUTPUT_DIR);
+        topLevel.forEach(f => log(`  ${OUTPUT_DIR}/${f}`));
+        if (existsSync(join(OUTPUT_DIR, 'python'))) {
+            const pythonDir = readdirSync(join(OUTPUT_DIR, 'python')).slice(0, 20);
+            pythonDir.forEach(f => log(`  ${OUTPUT_DIR}/python/${f}`));
+            if (pythonDir.length >= 20) log('  ... (truncated)');
+        } else {
+            logError('  WARNING: python/ subdirectory not found after extraction!');
+            const allDirs = topLevel.filter(f => {
+                try { return readdirSync(join(OUTPUT_DIR, f)).length > 0; } catch { return false; }
+            });
+            log(`  Subdirectories found: ${allDirs.join(', ')}`);
+        }
+    } catch (e) { logError(`  Could not list extracted dir: ${e.message}`); }
 
     // Verify extraction
     if (!existsSync(PYTHON_EXE)) {
@@ -240,6 +278,14 @@ async function installDependencies() {
         process.exit(1);
     }
 
+    // Show requirements contents for diagnostics
+    log('── requirements.txt contents ──');
+    try {
+        const reqContent = readFileSync(REQUIREMENTS_FILE, 'utf8');
+        reqContent.split('\n').forEach(line => log(`  ${line}`));
+    } catch (e) { logError(`  Could not read: ${e.message}`); }
+    log('');
+
     log(`Installing dependencies from ${REQUIREMENTS_FILE}...`);
     log('This may take several minutes (torch, faster-whisper, etc.)...');
 
@@ -260,7 +306,7 @@ async function installDependencies() {
 
     try {
         runPip(
-            `install --only-binary=:all: ${nativePackages.join(' ')}`,
+            `install --only-binary=:all: --verbose ${nativePackages.join(' ')}`,
             { timeoutMs: 1200000 } // 20 min (torch is large)
         );
         log('Phase 1 complete: native packages installed.');
@@ -296,8 +342,8 @@ async function installDependencies() {
 
     // ── Phase 4: Verify critical dependencies ────────────────────────────
     log('');
-    log('── Verifying critical dependencies ──');
-    const criticalDeps = ['fastapi', 'uvicorn', 'numpy', 'faster_whisper'];
+    log('── Verifying critical dependencies (import test) ──');
+    const criticalDeps = ['fastapi', 'uvicorn', 'numpy', 'ctranslate2', 'faster_whisper', 'torch', 'soundfile', 'pydub'];
 
     let allOk = true;
     for (const dep of criticalDeps) {
@@ -310,9 +356,15 @@ async function installDependencies() {
             log(`  ✓ ${output.trim()}`);
         } catch (err) {
             const stderr = err.stderr ? err.stderr.toString().trim() : '';
+            const stdout = err.stdout ? err.stdout.toString().trim() : '';
             logError(`  ✗ ${dep} — FAILED TO IMPORT`);
+            if (stdout) {
+                logError(`    [stdout] ${stdout}`);
+            }
             if (stderr) {
-                logError(`    ${stderr.split('\n').slice(-3).join('\n    ')}`);
+                // Show full traceback, not just last 3 lines
+                logError(`    [stderr]`);
+                stderr.split('\n').forEach(line => logError(`      ${line}`));
             }
             allOk = false;
         }

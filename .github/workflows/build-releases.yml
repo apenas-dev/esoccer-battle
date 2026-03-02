@@ -23,6 +23,18 @@ jobs:
           cache: 'npm'
           cache-dependency-path: apps/desktop/package-lock.json
 
+      - name: Environment Diagnostics
+        shell: powershell
+        run: |
+          Write-Host "=== Environment Diagnostics ==="
+          Write-Host "OS:          $([System.Environment]::OSVersion)"
+          Write-Host "Node:        $(node --version)"
+          Write-Host "NPM:         $(npm --version)"
+          Write-Host "Workspace:   $(Get-Location)"
+          Write-Host "Disk Free:   $([math]::Round((Get-PSDrive C).Free / 1GB, 1)) GB"
+          Write-Host "Disk Used:   $([math]::Round((Get-PSDrive C).Used / 1GB, 1)) GB"
+          Write-Host "================================"
+
       - name: Install dependencies
         working-directory: apps/desktop
         run: npm install
@@ -32,6 +44,64 @@ jobs:
         shell: powershell
         run: npm run prepare:python
 
+      - name: Verify Build Artifacts Exist
+        working-directory: apps/desktop
+        shell: powershell
+        run: |
+          Write-Host "=== Verifying build artifacts ==="
+          
+          Write-Host "`n--- python-standalone ---"
+          if (Test-Path "python-standalone\python\python.exe") {
+            Write-Host "[OK] python.exe found"
+            & "python-standalone\python\python.exe" --version
+          } else {
+            Write-Host "[FAIL] python.exe NOT FOUND"
+            if (Test-Path "python-standalone") {
+              Write-Host "Contents of python-standalone:"
+              Get-ChildItem -Path "python-standalone" -Recurse -Depth 1 | ForEach-Object { Write-Host "  $_" }
+            } else {
+              Write-Host "python-standalone/ directory does not exist!"
+            }
+            exit 1
+          }
+          
+          Write-Host "`n--- pip list ---"
+          & "python-standalone\python\python.exe" -m pip list --format=columns
+          
+          Write-Host "`n--- Import verification ---"
+          $deps = @("fastapi", "uvicorn", "numpy", "ctranslate2", "faster_whisper", "torch", "soundfile", "pydub")
+          $failed = @()
+          foreach ($dep in $deps) {
+            $result = & "python-standalone\python\python.exe" -c "import $dep; print('$dep', getattr($dep, '__version__', 'OK'))" 2>&1
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "[PASS] $result"
+            } else {
+              Write-Host "[FAIL] $dep"
+              Write-Host "       $result"
+              $failed += $dep
+            }
+          }
+          
+          Write-Host "`n--- build/ directory ---"
+          if (Test-Path "build") {
+            Get-ChildItem -Path "build" | ForEach-Object { Write-Host "  $($_.Name)  ($($_.Length) bytes)" }
+          } else {
+            Write-Host "build/ directory does not exist!"
+          }
+          
+          Write-Host "`n--- voice-engine ---"
+          if (Test-Path "..\..\backend\voice-engine\esoccer_voice") {
+            Write-Host "[OK] voice-engine/esoccer_voice found"
+          } else {
+            Write-Host "[FAIL] voice-engine/esoccer_voice NOT FOUND"
+          }
+          
+          if ($failed.Count -gt 0) {
+            Write-Host "`n[ERROR] Failed imports: $($failed -join ', ')"
+            exit 1
+          }
+          
+          Write-Host "`n=== All artifacts verified ==="
 
       - name: Download MSVC Redistributable
         working-directory: apps/desktop
