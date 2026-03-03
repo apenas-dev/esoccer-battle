@@ -8,6 +8,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { TerminalLine } from '../components/TerminalOutput';
 import { DownloadProgress } from '../components/DownloadScreen';
 import { LoadingProgress } from '../components/LoadingScreen';
+import { SetupError, createSetupError } from '../../shared/SetupError';
 
 export type InitializationState = 'checking' | 'downloading' | 'loading' | 'ready' | 'error';
 
@@ -16,9 +17,10 @@ interface UseInitializationReturn {
   downloadProgress: DownloadProgress;
   loadingProgress: LoadingProgress;
   terminalLines: TerminalLine[];
-  error: string | null;
+  error: SetupError | null;
   retry: () => void;
   restart: () => void;
+  retryCount: number;
 }
 
 /**
@@ -44,8 +46,10 @@ export function useInitialization(): UseInitializationReturn {
     message: 'Iniciando...',
   });
   const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  
+  const [error, setError] = useState<SetupError | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const MAX_RETRIES = 3;
+
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const isInitializedRef = useRef(false);
 
@@ -64,14 +68,14 @@ export function useInitialization(): UseInitializationReturn {
    */
   const startDownload = useCallback(async () => {
     if (!window.esoccerApi) {
-      setError('API não disponível');
+      setError(createSetupError('UNKNOWN', 'API do sistema não disponível', undefined, true));
       setState('error');
       return;
     }
 
     setTerminalLines([]);
     addTerminalLine('Iniciando processo de download...', 'command');
-    
+
     // Subscribe to progress events
     unsubscribeRef.current = window.esoccerApi.onDownloadProgress((event) => {
       setDownloadProgress({
@@ -79,7 +83,7 @@ export function useInitialization(): UseInitializationReturn {
         percentage: event.percentage,
         message: event.message,
       });
-      
+
       // Add terminal line based on stage
       if (event.stage === 'checking') {
         addTerminalLine(event.message, 'info');
@@ -93,22 +97,24 @@ export function useInitialization(): UseInitializationReturn {
         addTerminalLine(event.message, 'success');
         setState('loading');
       } else if (event.stage === 'error') {
-        addTerminalLine(event.message, 'error');
-        setError(event.message);
+        addTerminalLine(`Erro no download: ${event.message}`, 'error');
+        // A partial error without SetupError context yet.
+        // It's usually followed by the result of startDownload() below.
+        setError((prev) => prev || createSetupError('MODEL_DOWNLOAD_FAIL', event.message, undefined, true));
         setState('error');
       }
     });
 
     // Start the download
     const result = await window.esoccerApi.startDownload();
-    
+
     if (result.success) {
       addTerminalLine('Download concluído com sucesso!', 'success');
       // Move to loading state
       startLoading();
     } else {
-      addTerminalLine(`Erro: ${result.error}`, 'error');
-      setError(result.error || 'Erro desconhecido');
+      addTerminalLine(`Erro: ${result.setupError?.message || 'Falha no download'}`, 'error');
+      setError(result.setupError || createSetupError('MODEL_DOWNLOAD_FAIL', 'Falha ao baixar modelos', undefined, true));
       setDownloadProgress((prev) => ({ ...prev, stage: 'error' }));
       setState('error');
     }
@@ -126,7 +132,7 @@ export function useInitialization(): UseInitializationReturn {
     });
 
     if (!window.esoccerApi) {
-      setError('API não disponível');
+      setError(createSetupError('UNKNOWN', 'API do sistema não disponível', undefined, true));
       setState('error');
       return;
     }
@@ -148,7 +154,7 @@ export function useInitialization(): UseInitializationReturn {
     const progressInterval = setInterval(() => {
       attempts++;
       const percentage = Math.min(90, Math.floor((attempts / maxAttempts) * 90));
-      
+
       if (percentage < 20) {
         setLoadingProgress({
           stage: 'backend',
@@ -193,7 +199,12 @@ export function useInitialization(): UseInitializationReturn {
     }
 
     clearInterval(progressInterval);
-    setError('Timeout ao aguardar o backend. Tente reiniciar o aplicativo.');
+    setError(createSetupError(
+      'BACKEND_TIMEOUT',
+      'Timeout ao aguardar o backend.',
+      'O inicializador falhou em responder após 60 segundos.',
+      true
+    ));
     setLoadingProgress({
       stage: 'error',
       percentage: 0,
@@ -206,6 +217,7 @@ export function useInitialization(): UseInitializationReturn {
    * Retry download
    */
   const retry = useCallback(() => {
+    setRetryCount(prev => prev + 1);
     setError(null);
     setTerminalLines([]);
     setDownloadProgress({
@@ -221,6 +233,7 @@ export function useInitialization(): UseInitializationReturn {
    * Restart loading
    */
   const restart = useCallback(async () => {
+    setRetryCount(prev => prev + 1);
     setError(null);
     setLoadingProgress({
       stage: 'backend',
@@ -232,7 +245,7 @@ export function useInitialization(): UseInitializationReturn {
     if (window.esoccerApi) {
       await window.esoccerApi.restartBackend();
     }
-    
+
     startLoading();
   }, [startLoading]);
 
@@ -248,7 +261,7 @@ export function useInitialization(): UseInitializationReturn {
         // Wait a bit for API to be available
         await new Promise((r) => setTimeout(r, 500));
         if (!window.esoccerApi) {
-          setError('API não disponível. Reinicie o aplicativo.');
+          setError(createSetupError('UNKNOWN', 'API não disponível. Reinicie o aplicativo.', undefined, true));
           setState('error');
           return;
         }
@@ -257,7 +270,7 @@ export function useInitialization(): UseInitializationReturn {
       try {
         // Check if this is first run
         const { isFirstRun } = await window.esoccerApi.checkFirstRun();
-        
+
         if (isFirstRun) {
           // First run - need to download models
           setState('downloading');
@@ -287,8 +300,8 @@ export function useInitialization(): UseInitializationReturn {
   useEffect(() => {
     if (!window.esoccerApi) return;
 
-    const unsubscribe = window.esoccerApi.onBackendError((errorMsg) => {
-      setError(errorMsg);
+    const unsubscribe = window.esoccerApi.onBackendError((errorObj) => {
+      setError(errorObj);
       setState('error');
     });
 
@@ -305,5 +318,6 @@ export function useInitialization(): UseInitializationReturn {
     error,
     retry,
     restart,
+    retryCount,
   };
 }

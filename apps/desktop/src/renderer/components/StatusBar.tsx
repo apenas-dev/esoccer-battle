@@ -47,7 +47,7 @@ export function StatusBar({ backendStatus, match, onShowHistory }: StatusBarProp
   useEffect(() => {
     if (backendStatus === 'offline' && isApiAvailable()) {
       window.esoccerApi!.getBackendStatus().then((status) => {
-        setBackendError(status.error);
+        setBackendError(status.error?.message || null);
         setLogsPath(status.logPath);
       }).catch(() => {
         // Ignore errors
@@ -101,8 +101,8 @@ export function StatusBar({ backendStatus, match, onShowHistory }: StatusBarProp
         // Give it a moment to connect
         setTimeout(handleRetryConnection, 2000);
       } else {
-        setStatusMessage(`❌ Falha ao reiniciar: ${result.error}`);
-        setBackendError(result.error);
+        setStatusMessage(`❌ Falha ao reiniciar: ${result.setupError?.message || 'Desconhecido'}`);
+        setBackendError(result.setupError?.message || null);
       }
     } catch (error) {
       setStatusMessage(`❌ Erro: ${error instanceof Error ? error.message : 'Desconhecido'}`);
@@ -119,24 +119,22 @@ export function StatusBar({ backendStatus, match, onShowHistory }: StatusBarProp
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
             <div
-              className={`w-2.5 h-2.5 rounded-full ${
-                backendStatus === 'online'
+              className={`w-2.5 h-2.5 rounded-full ${backendStatus === 'online'
                   ? 'bg-green-500 animate-pulse'
                   : backendStatus === 'offline'
-                  ? 'bg-red-500'
-                  : 'bg-yellow-500 animate-pulse'
-              }`}
+                    ? 'bg-red-500'
+                    : 'bg-yellow-500 animate-pulse'
+                }`}
             />
             <span className="text-sm text-slate-400">
               Backend:{' '}
               <span
-                className={`font-medium ${
-                  backendStatus === 'online'
+                className={`font-medium ${backendStatus === 'online'
                     ? 'text-green-400'
                     : backendStatus === 'offline'
-                    ? 'text-red-400'
-                    : 'text-yellow-400'
-                }`}
+                      ? 'text-red-400'
+                      : 'text-yellow-400'
+                  }`}
               >
                 {backendStatus === 'online' ? 'Online' : backendStatus === 'offline' ? 'Offline' : 'Verificando...'}
               </span>

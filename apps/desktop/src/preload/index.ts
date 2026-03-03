@@ -14,6 +14,7 @@ import { CommandEngine, CommandResult } from '../core/commands/CommandEngine';
 import { SQLiteMatchStore, SQLiteCommandLogStore } from '../core/stores/sqlite';
 import { InMemoryDoubtStore } from '../core/stores/InMemoryDoubtStore';
 import { PythonVoiceTranscriberAdapter, PythonVoiceSynthesizerAdapter } from '../core/adapters/python';
+import { SetupError } from '../shared/SetupError';
 
 console.log('[preload] Script starting...');
 console.log('[preload] __dirname:', __dirname);
@@ -99,7 +100,7 @@ interface BackendHealthResponse {
  */
 interface BackendStatus {
   running: boolean;
-  error: string | null;
+  error: SetupError | null;
   url: string;
   logPath: string;
 }
@@ -152,15 +153,16 @@ interface EsoccerApi {
 
   // Backend management (via IPC to main process)
   getBackendStatus: () => Promise<BackendStatus>;
-  restartBackend: () => Promise<{ success: boolean; error: string | null }>;
+  restartBackend: () => Promise<{ success: boolean; setupError?: SetupError }>;
   getLogsPath: () => Promise<string>;
+  openLogs: () => Promise<void>;
 
   // Initialization APIs (for download/loading screens)
   checkFirstRun: () => Promise<FirstRunCheck>;
-  startDownload: () => Promise<{ success: boolean; error?: string }>;
+  startDownload: () => Promise<{ success: boolean; setupError?: SetupError }>;
   checkBackendReady: () => Promise<{ ready: boolean; status: unknown }>;
   onDownloadProgress: (callback: (event: DownloadProgressEvent) => void) => () => void;
-  onBackendError: (callback: (error: string) => void) => () => void;
+  onBackendError: (callback: (error: SetupError) => void) => () => void;
 }
 
 /**
@@ -472,7 +474,12 @@ const esoccerApi: EsoccerApi = {
       console.error('[preload] getBackendStatus error:', error);
       return {
         running: false,
-        error: `Erro ao obter status: ${error instanceof Error ? error.message : 'desconhecido'}`,
+        error: {
+          code: 'UNKNOWN',
+          category: 'system',
+          message: `Erro ao obter status: ${error instanceof Error ? error.message : 'desconhecido'}`,
+          recoveryActions: [{ id: 'restart_app', label: 'Reiniciar App', variant: 'primary' }],
+        } as SetupError,
         url: PYTHON_BACKEND_URL,
         logPath: '',
       };
@@ -490,7 +497,12 @@ const esoccerApi: EsoccerApi = {
       console.error('[preload] restartBackend error:', error);
       return {
         success: false,
-        error: `Erro ao reiniciar: ${error instanceof Error ? error.message : 'desconhecido'}`,
+        setupError: {
+          code: 'UNKNOWN',
+          category: 'system',
+          message: `Erro ao reiniciar: ${error instanceof Error ? error.message : 'desconhecido'}`,
+          recoveryActions: [{ id: 'restart_app', label: 'Reiniciar App', variant: 'primary' }],
+        } as SetupError,
       };
     }
   },
@@ -505,6 +517,18 @@ const esoccerApi: EsoccerApi = {
     } catch (error) {
       console.error('[preload] getLogsPath error:', error);
       return '';
+    }
+  },
+
+  /**
+   * Open logs folder
+   */
+  openLogs: async () => {
+    console.log('[preload] openLogs called');
+    try {
+      await ipcRenderer.invoke('open-logs');
+    } catch (error) {
+      console.error('[preload] openLogs error:', error);
     }
   },
 
@@ -535,7 +559,12 @@ const esoccerApi: EsoccerApi = {
       console.error('[preload] startDownload error:', error);
       return {
         success: false,
-        error: `Erro ao iniciar download: ${error instanceof Error ? error.message : 'desconhecido'}`,
+        setupError: {
+          code: 'UNKNOWN',
+          category: 'system',
+          message: `Erro ao iniciar download: ${error instanceof Error ? error.message : 'desconhecido'}`,
+          recoveryActions: [{ id: 'restart_app', label: 'Reiniciar App', variant: 'primary' }],
+        } as SetupError,
       };
     }
   },
@@ -571,9 +600,9 @@ const esoccerApi: EsoccerApi = {
   /**
    * Subscribe to backend error events
    */
-  onBackendError: (callback: (error: string) => void) => {
+  onBackendError: (callback: (error: SetupError) => void) => {
     console.log('[preload] onBackendError subscribed');
-    const handler = (_event: Electron.IpcRendererEvent, error: string) => {
+    const handler = (_event: Electron.IpcRendererEvent, error: SetupError) => {
       callback(error);
     };
     ipcRenderer.on('backend-error', handler);

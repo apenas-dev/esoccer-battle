@@ -4,11 +4,12 @@
  * Follows SOLID + KISS + camelCase
  */
 
-import { app, BrowserWindow, shell, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, shell, ipcMain } from 'electron';
 import { join } from 'path';
 import { spawn, ChildProcess, execSync } from 'child_process';
 import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import { electronApp, optimizer, is } from '@electron-toolkit/utils';
+import { SetupError, createSetupError } from '../shared/SetupError';
 
 // Disable GPU acceleration for headless/server environments
 app.disableHardwareAcceleration();
@@ -22,7 +23,7 @@ process.env.ESOCCER_USER_DATA = app.getPath('userData');
 // Python backend process reference
 let pythonProcess: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
-let backendError: string | null = null;
+let backendError: SetupError | null = null;
 
 const PYTHON_BACKEND_URL = 'http://127.0.0.1:8001';
 
@@ -145,11 +146,13 @@ function getVoiceEnginePath(): string {
 /**
  * Check if critical Python dependencies are importable
  */
-function checkPythonDependencies(pythonCmd: string, voiceEnginePath: string): { installed: boolean; error?: string; missingDeps?: string[] } {
+function checkPythonDependencies(pythonCmd: string, voiceEnginePath: string): { installed: boolean; setupError?: SetupError } {
   const criticalDependencies = ['fastapi', 'uvicorn', 'pydub', 'numpy', 'faster_whisper'];
   const missingDeps: string[] = [];
+  const importErrors: string[] = [];
   const checkEnv = buildPythonEnv(voiceEnginePath);
   const safePath = voiceEnginePath.replace(/\\/g, '\\\\');
+  const isWindows = process.platform === 'win32';
 
   try {
     for (const dep of criticalDependencies) {
@@ -159,14 +162,27 @@ function checkPythonDependencies(pythonCmd: string, voiceEnginePath: string): { 
           { encoding: 'utf8', timeout: 15000, cwd: voiceEnginePath, env: checkEnv, stdio: ['ignore', 'pipe', 'pipe'] }
         );
         logMessage('info', `Dependency check: ${dep} - OK`);
-      } catch {
+      } catch (err) {
         logMessage('warn', `Missing Python dependency: ${dep}`);
         missingDeps.push(dep);
+        const stderr = err && typeof err === 'object' && 'stderr' in err ? String(err.stderr).trim() : '';
+        if (stderr) importErrors.push(`[${dep}] ${stderr}`);
       }
     }
 
     if (missingDeps.length > 0) {
-      return { installed: false, error: `Dependências não encontradas: ${missingDeps.join(', ')}`, missingDeps };
+      const details = importErrors.length > 0
+        ? `Tracebacks:\n${importErrors.join('\n\n')}`
+        : undefined;
+      return {
+        installed: false,
+        setupError: createSetupError(
+          importErrors.length > 0 ? 'DEPS_IMPORT_FAIL' : 'DEPS_MISSING',
+          `Dependências não encontradas: ${missingDeps.join(', ')}`,
+          details,
+          isWindows,
+        ),
+      };
     }
 
     // Verify esoccer_voice module
@@ -177,15 +193,30 @@ function checkPythonDependencies(pythonCmd: string, voiceEnginePath: string): { 
       );
       logMessage('info', 'esoccer_voice module check: OK');
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      return { installed: false, error: `Módulo esoccer_voice não carrega: ${errorMsg}` };
+      const stderr = error && typeof error === 'object' && 'stderr' in error ? String(error.stderr).trim() : '';
+      return {
+        installed: false,
+        setupError: createSetupError(
+          'DEPS_IMPORT_FAIL',
+          'Módulo esoccer_voice não carrega',
+          stderr || (error instanceof Error ? error.message : String(error)),
+          isWindows,
+        ),
+      };
     }
 
     logMessage('info', 'Python dependencies check passed');
     return { installed: true };
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    return { installed: false, error: errorMsg };
+    return {
+      installed: false,
+      setupError: createSetupError(
+        'UNKNOWN',
+        `Erro ao verificar dependências: ${error instanceof Error ? error.message : String(error)}`,
+        undefined,
+        isWindows,
+      ),
+    };
   }
 }
 
@@ -206,17 +237,19 @@ function buildPythonEnv(voiceEnginePath: string): NodeJS.ProcessEnv {
  * Start the Python backend process
  */
 async function startPythonBackend(): Promise<boolean> {
+  const isWindows = process.platform === 'win32';
   const pythonCmd = getPythonCmd();
 
   if (!pythonCmd) {
-    backendError = 'Python não encontrado. Verifique a instalação do aplicativo.';
-    logMessage('error', backendError);
-    dialog.showErrorBox(
-      'Python não encontrado',
-      process.platform === 'win32'
+    backendError = createSetupError(
+      isWindows ? 'PYTHON_EMBEDDED_MISSING' : 'PYTHON_NOT_FOUND',
+      isWindows
         ? 'O Python embutido não foi encontrado. Reinstale o aplicativo.'
-        : 'Python 3.10+ não encontrado.\nInstale com: sudo apt install python3 python3-pip'
+        : 'Python 3.10+ não encontrado. Instale com: sudo apt install python3 python3-pip',
+      undefined,
+      isWindows,
     );
+    logMessage('error', `[${backendError.code}] ${backendError.message}`);
     return false;
   }
 
@@ -226,32 +259,21 @@ async function startPythonBackend(): Promise<boolean> {
   logMessage('info', `Running in ${is.dev ? 'development' : 'production'} mode`);
 
   if (!existsSync(voiceEnginePath)) {
-    backendError = `Backend não encontrado em: ${voiceEnginePath}`;
-    logMessage('error', backendError);
-    dialog.showErrorBox(
-      'Backend não encontrado',
-      `O backend de voz não foi encontrado em:\n${voiceEnginePath}\n\n` +
-      'Verifique se a instalação foi concluída corretamente.'
+    backendError = createSetupError(
+      'BACKEND_NOT_FOUND',
+      `O backend de voz não foi encontrado em: ${voiceEnginePath}`,
+      'Verifique se a instalação foi concluída corretamente.',
+      isWindows,
     );
+    logMessage('error', `[${backendError.code}] ${backendError.message}`);
     return false;
   }
 
   // Verify dependencies are available
   const depsCheck = checkPythonDependencies(pythonCmd, voiceEnginePath);
   if (!depsCheck.installed) {
-    logMessage('warn', `Dependencies check failed: ${depsCheck.error}`);
-    // On Windows, deps should be pre-installed — this is a broken install
-    if (process.platform === 'win32') {
-      backendError = `Dependências não encontradas no Python embutido: ${depsCheck.error}`;
-      dialog.showErrorBox('Instalação Incompleta', `${backendError}\n\nReinstale o aplicativo.`);
-      return false;
-    }
-    // On Linux, user needs to install deps manually
-    backendError = `Dependências faltando: ${depsCheck.error}`;
-    dialog.showErrorBox(
-      'Dependências Faltando',
-      `${backendError}\n\nInstale com:\npip install -r "${join(voiceEnginePath, 'requirements.txt')}"`
-    );
+    backendError = depsCheck.setupError!;
+    logMessage('warn', `[${backendError.code}] ${backendError.message}`);
     return false;
   }
 
@@ -295,7 +317,14 @@ async function startPythonBackend(): Promise<boolean> {
     pythonProcess.on('exit', (code, signal) => {
       logMessage('info', `Process exited with code ${code}, signal ${signal}`);
       if (code !== 0 && code !== null) {
-        backendError = `Backend encerrou com erro (código ${code}).\n${startupErrors.slice(-3).join('\n')}`;
+        const stderrFull = startupErrors.join('\n');
+        backendError = createSetupError(
+          'BACKEND_CRASH',
+          `Backend encerrou com erro (código ${code})`,
+          stderrFull || undefined,
+          process.platform === 'win32',
+        );
+        logMessage('error', `[${backendError.code}] exit code ${code}`);
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('backend-error', backendError);
         }
@@ -304,8 +333,13 @@ async function startPythonBackend(): Promise<boolean> {
     });
 
     pythonProcess.on('error', (err) => {
-      backendError = `Erro ao iniciar backend: ${err.message}`;
-      logMessage('error', backendError);
+      backendError = createSetupError(
+        'BACKEND_CRASH',
+        `Não foi possível iniciar o processo Python: ${err.message}`,
+        err.stack,
+        process.platform === 'win32',
+      );
+      logMessage('error', `[${backendError.code}] ${err.message}`);
       pythonProcess = null;
     });
 
@@ -317,9 +351,14 @@ async function startPythonBackend(): Promise<boolean> {
       return true;
     }
 
-    backendError = 'Backend iniciou mas não respondeu ao health check.\n' +
-      'Verifique os logs em: ' + join(app.getPath('userData'), 'logs', 'backend.log');
-    logMessage('warn', 'Backend started but health check failed');
+    const logPath = join(app.getPath('userData'), 'logs', 'backend.log');
+    backendError = createSetupError(
+      'BACKEND_TIMEOUT',
+      'Backend iniciou mas não respondeu ao health check após 30 segundos',
+      `Verifique os logs em: ${logPath}\n\nÚltimos erros:\n${startupErrors.slice(-5).join('\n')}`,
+      process.platform === 'win32',
+    );
+    logMessage('warn', `[${backendError.code}] health check timed out`);
 
     if (pythonProcess && pythonProcess.exitCode === null) {
       logMessage('info', 'Process still running, may connect later');
@@ -328,9 +367,13 @@ async function startPythonBackend(): Promise<boolean> {
 
     return false;
   } catch (error) {
-    backendError = `Não foi possível iniciar o backend: ${error instanceof Error ? error.message : String(error)}`;
-    logMessage('error', backendError);
-    dialog.showErrorBox('Erro ao iniciar backend', backendError);
+    backendError = createSetupError(
+      'UNKNOWN',
+      `Não foi possível iniciar o backend: ${error instanceof Error ? error.message : String(error)}`,
+      error instanceof Error ? error.stack : undefined,
+      process.platform === 'win32',
+    );
+    logMessage('error', `[${backendError.code}] ${backendError.message}`);
     return false;
   }
 }
@@ -459,7 +502,7 @@ function checkModelsExist(): { whisperReady: boolean; kokoroReady: boolean; mode
  */
 async function downloadModels(
   onProgress: (stage: string, percentage: number, message: string) => void
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; setupError?: SetupError }> {
   try {
     onProgress('checking', 5, 'Verificando backend...');
 
@@ -472,15 +515,15 @@ async function downloadModels(
         onProgress('checking', 8, 'Iniciando backend...');
         const started = await startPythonBackend();
         if (!started) {
-          return { success: false, error: backendError || 'Falha ao iniciar backend' };
+          return { success: false, setupError: backendError || createSetupError('UNKNOWN', 'Falha ao iniciar backend', undefined, process.platform === 'win32') };
         }
         // Wait again after starting
         const isReady = await waitForBackendReady(30000);
         if (!isReady) {
-          return { success: false, error: 'Backend iniciou mas não respondeu' };
+          return { success: false, setupError: createSetupError('BACKEND_TIMEOUT', 'Backend iniciou mas não respondeu', undefined, process.platform === 'win32') };
         }
       } else {
-        return { success: false, error: 'Backend não está respondendo. Verifique os logs.' };
+        return { success: false, setupError: createSetupError('BACKEND_HEALTH_FAIL', 'Backend não está respondendo. Verifique os logs.', undefined, process.platform === 'win32') };
       }
     }
 
@@ -495,7 +538,15 @@ async function downloadModels(
 
     if (!response.ok) {
       const errorText = await response.text();
-      return { success: false, error: `Download falhou: ${errorText}` };
+      return {
+        success: false,
+        setupError: createSetupError(
+          'MODEL_DOWNLOAD_FAIL',
+          `Download falhou (HTTP ${response.status})`,
+          errorText,
+          process.platform === 'win32',
+        ),
+      };
     }
 
     const result = await response.json();
@@ -504,15 +555,35 @@ async function downloadModels(
       onProgress('complete', 100, 'Modelos baixados com sucesso!');
       return { success: true };
     } else {
+      const failedModels = [
+        !result.whisperReady ? 'Whisper' : '',
+        !result.kokoroReady ? 'Kokoro' : '',
+      ].filter(Boolean).join(', ');
       return {
         success: false,
-        error: `Modelos não prontos: Whisper=${result.whisperReady}, Kokoro=${result.kokoroReady}`
+        setupError: createSetupError(
+          'MODEL_DOWNLOAD_FAIL',
+          `Download incompleto — modelo(s) faltando: ${failedModels}`,
+          `Whisper: ${result.whisperReady ? 'OK' : 'FALHOU'}\nKokoro: ${result.kokoroReady ? 'OK' : 'FALHOU'}`,
+          process.platform === 'win32',
+        ),
       };
     }
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     logMessage('error', `Download models failed: ${errorMsg}`);
-    return { success: false, error: errorMsg };
+    const isTimeout = errorMsg.includes('timeout') || errorMsg.includes('abort');
+    return {
+      success: false,
+      setupError: createSetupError(
+        isTimeout ? 'MODEL_DOWNLOAD_TIMEOUT' : 'MODEL_DOWNLOAD_FAIL',
+        isTimeout
+          ? 'Download demorou mais de 10 minutos. Verifique sua conexão.'
+          : `Falha no download: ${errorMsg}`,
+        error instanceof Error ? error.stack : undefined,
+        process.platform === 'win32',
+      ),
+    };
   }
 }
 
@@ -530,6 +601,12 @@ function setupIpcHandlers(): void {
     };
   });
 
+  // Open logs folder in file explorer
+  ipcMain.handle('open-logs', () => {
+    const logPath = join(app.getPath('userData'), 'logs', 'backend.log');
+    shell.showItemInFolder(logPath);
+  });
+
   // Restart backend
   ipcMain.handle('restart-backend', async () => {
     logMessage('info', 'Restart backend requested via IPC');
@@ -539,7 +616,7 @@ function setupIpcHandlers(): void {
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
     const success = await startPythonBackend();
-    return { success, error: backendError };
+    return { success, error: backendError?.message || null, setupError: backendError };
   });
 
   // Get logs path
@@ -574,8 +651,14 @@ function setupIpcHandlers(): void {
     // Verify Python is available
     const pythonCmd = getPythonCmd();
     if (!pythonCmd) {
-      sendProgress('error', 0, 'Python não encontrado. Reinstale o aplicativo.');
-      return { success: false, error: 'Python não encontrado' };
+      const err = createSetupError(
+        process.platform === 'win32' ? 'PYTHON_EMBEDDED_MISSING' : 'PYTHON_NOT_FOUND',
+        'Python não encontrado. Reinstale o aplicativo.',
+        undefined,
+        process.platform === 'win32',
+      );
+      sendProgress('error', 0, err.message);
+      return { success: false, setupError: err };
     }
 
     sendProgress('checking', 10, 'Python OK');
@@ -591,9 +674,9 @@ function setupIpcHandlers(): void {
 
       const started = await startPythonBackend();
       if (!started) {
-        const errorMsg = backendError || 'Falha ao iniciar backend';
-        sendProgress('error', 0, errorMsg);
-        return { success: false, error: errorMsg };
+        const err = backendError || createSetupError('UNKNOWN', 'Falha ao iniciar backend', undefined, process.platform === 'win32');
+        sendProgress('error', 0, err.message);
+        return { success: false, setupError: err };
       }
     }
 
@@ -609,8 +692,8 @@ function setupIpcHandlers(): void {
       sendProgress('complete', 100, 'Instalação completa!');
       return { success: true };
     } else {
-      sendProgress('error', 0, result.error || 'Erro desconhecido');
-      return { success: false, error: result.error };
+      sendProgress('error', 0, result.setupError?.message || 'Erro desconhecido');
+      return { success: false, setupError: result.setupError };
     }
   });
 

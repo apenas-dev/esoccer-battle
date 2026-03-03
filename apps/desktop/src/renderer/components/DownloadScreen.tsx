@@ -6,6 +6,7 @@
 
 import React from 'react';
 import { TerminalOutput, TerminalLine } from './TerminalOutput';
+import { SetupError, getErrorTitle, getCategoryIcon } from '../../shared/SetupError';
 
 export interface DownloadProgress {
   stage: 'checking' | 'dependencies' | 'backend' | 'whisper' | 'kokoro' | 'finalizing' | 'complete' | 'error';
@@ -16,7 +17,7 @@ export interface DownloadProgress {
 interface DownloadScreenProps {
   progress: DownloadProgress;
   terminalLines: TerminalLine[];
-  error?: string | null;
+  error?: SetupError | null;
   onRetry?: () => void;
 }
 
@@ -87,13 +88,12 @@ export function DownloadScreen({
             </div>
             <div className="h-4 bg-slate-700 rounded-full overflow-hidden">
               <div
-                className={`h-full transition-all duration-500 ease-out ${
-                  isError
+                className={`h-full transition-all duration-500 ease-out ${isError
                     ? 'bg-gradient-to-r from-red-600 to-red-400'
                     : isComplete
-                    ? 'bg-gradient-to-r from-green-600 to-green-400'
-                    : 'bg-gradient-to-r from-blue-600 to-cyan-400 animate-pulse'
-                }`}
+                      ? 'bg-gradient-to-r from-green-600 to-green-400'
+                      : 'bg-gradient-to-r from-blue-600 to-cyan-400 animate-pulse'
+                  }`}
                 style={{ width: `${progress.percentage}%` }}
               />
             </div>
@@ -118,18 +118,56 @@ export function DownloadScreen({
           {isError && (
             <div className="space-y-4">
               <div className="p-4 bg-red-900/30 border border-red-500/50 rounded-lg">
-                <p className="text-red-400 font-medium">Erro durante a instalação:</p>
-                <p className="text-red-300 text-sm mt-1">{error || progress.message}</p>
+                <h3 className="text-red-400 font-semibold mb-2 flex items-center gap-2">
+                  <span>{error ? getCategoryIcon(error.category) : '❗'}</span>
+                  <span>{error ? getErrorTitle(error.code) : 'Erro durante a instalação'}</span>
+                </h3>
+                <p className="text-red-300 text-sm mt-1">{error?.message || progress.message}</p>
+                {error?.details && (
+                  <details className="mt-3">
+                    <summary className="text-xs text-red-400/80 cursor-pointer hover:text-red-400 focus:outline-none">Ver detalhes técnicos</summary>
+                    <pre className="mt-2 text-[10px] text-red-300/80 bg-red-950/50 p-2 rounded overflow-x-auto whitespace-pre-wrap max-h-32">
+                      {error.details}
+                    </pre>
+                  </details>
+                )}
               </div>
-              {onRetry && (
-                <button
-                  onClick={onRetry}
-                  className="w-full py-3 px-6 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
-                >
-                  <span>🔄</span>
-                  <span>Tentar Novamente</span>
-                </button>
-              )}
+
+              <div className="flex gap-3 mt-4">
+                {error?.recoveryActions?.map(action => {
+                  const isPrimary = action.variant === 'primary';
+                  const baseClasses = "py-3 px-6 font-semibold rounded-lg transition-colors flex-1 flex items-center justify-center gap-2";
+                  const colorClasses = isPrimary
+                    ? "bg-blue-600 hover:bg-blue-500 text-white"
+                    : "bg-slate-700 hover:bg-slate-600 text-slate-200";
+
+                  return (
+                    <button
+                      key={action.id}
+                      onClick={() => {
+                        if (action.id === 'open_logs') {
+                          window.esoccerApi?.openLogs?.();
+                        } else {
+                          onRetry?.();
+                        }
+                      }}
+                      className={`${baseClasses} ${colorClasses}`}
+                    >
+                      {action.label}
+                    </button>
+                  );
+                })}
+
+                {(!error?.recoveryActions || error.recoveryActions.length === 0) && onRetry && (
+                  <button
+                    onClick={onRetry}
+                    className="w-full py-3 px-6 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                  >
+                    <span>🔄</span>
+                    <span>Tentar Novamente</span>
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
