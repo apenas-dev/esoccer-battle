@@ -144,30 +144,75 @@ function getVoiceEnginePath(): string {
 }
 
 /**
- * Check if critical Python dependencies are importable
+ * Check if critical Python dependencies are importable.
+ * Uses a SINGLE Python subprocess to avoid repeated cold-start overhead.
+ * On Windows, native DLLs (ctranslate2/torch) can take 20-30s on first load,
+ * so we use a generous 120s timeout for the whole batch.
  */
 function checkPythonDependencies(pythonCmd: string, voiceEnginePath: string): { installed: boolean; setupError?: SetupError } {
   const criticalDependencies = ['fastapi', 'uvicorn', 'pydub', 'numpy', 'faster_whisper'];
-  const missingDeps: string[] = [];
-  const importErrors: string[] = [];
   const checkEnv = buildPythonEnv(voiceEnginePath);
-  const safePath = voiceEnginePath.replace(/\\/g, '\\\\');
   const isWindows = process.platform === 'win32';
 
+  // Build a single Python script that checks all deps at once
+  // We write to a temp file to avoid Windows cmd.exe quoting issues
+  const checkScript = [
+    'import sys, json, traceback',
+    `deps = ${JSON.stringify(criticalDependencies)}`,
+    'results = {}',
+    'for dep in deps:',
+    '    try:',
+    '        __import__(dep)',
+    '        results[dep] = {"ok": True}',
+    '    except Exception:',
+    '        results[dep] = {"ok": False, "error": traceback.format_exc()}',
+    'try:',
+    `    sys.path.insert(0, ${JSON.stringify(voiceEnginePath.replace(/\\/g, '/'))})`,
+    '    from esoccer_voice.api import main',
+    '    results["esoccer_voice"] = {"ok": True}',
+    'except Exception:',
+    '    results["esoccer_voice"] = {"ok": False, "error": traceback.format_exc()}',
+    'print(json.dumps(results))',
+  ].join('\n');
+
+  const tmpScript = join(app.getPath('temp'), 'esoccer_dep_check.py');
+
   try {
+    writeFileSync(tmpScript, checkScript, 'utf8');
+    logMessage('info', 'Checking Python dependencies (batch import)...');
+    const output = execSync(
+      `"${pythonCmd}" "${tmpScript}"`,
+      { encoding: 'utf8', timeout: 120000, cwd: voiceEnginePath, env: checkEnv, stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+
+    const results = JSON.parse(output.trim());
+    const missingDeps: string[] = [];
+    const importErrors: string[] = [];
+
     for (const dep of criticalDependencies) {
-      try {
-        execSync(
-          `"${pythonCmd}" -c "import ${dep}; print('${dep} OK')"`,
-          { encoding: 'utf8', timeout: 15000, cwd: voiceEnginePath, env: checkEnv, stdio: ['ignore', 'pipe', 'pipe'] }
-        );
+      if (results[dep]?.ok) {
         logMessage('info', `Dependency check: ${dep} - OK`);
-      } catch (err) {
+      } else {
         logMessage('warn', `Missing Python dependency: ${dep}`);
         missingDeps.push(dep);
-        const stderr = err && typeof err === 'object' && 'stderr' in err ? String(err.stderr).trim() : '';
-        if (stderr) importErrors.push(`[${dep}] ${stderr}`);
+        if (results[dep]?.error) importErrors.push(`[${dep}] ${results[dep].error}`);
       }
+    }
+
+    // Check esoccer_voice separately
+    if (results['esoccer_voice']?.ok) {
+      logMessage('info', 'esoccer_voice module check: OK');
+    } else {
+      logMessage('warn', 'esoccer_voice module failed to load');
+      return {
+        installed: false,
+        setupError: createSetupError(
+          'DEPS_IMPORT_FAIL',
+          'Módulo esoccer_voice não carrega',
+          results['esoccer_voice']?.error || 'Erro desconhecido',
+          isWindows,
+        ),
+      };
     }
 
     if (missingDeps.length > 0) {
@@ -185,35 +230,19 @@ function checkPythonDependencies(pythonCmd: string, voiceEnginePath: string): { 
       };
     }
 
-    // Verify esoccer_voice module
-    try {
-      execSync(
-        `"${pythonCmd}" -c "import sys; sys.path.insert(0, '${safePath}'); from esoccer_voice.api import main; print('esoccer_voice OK')"`,
-        { encoding: 'utf8', timeout: 15000, cwd: voiceEnginePath, env: checkEnv, stdio: ['ignore', 'pipe', 'pipe'] }
-      );
-      logMessage('info', 'esoccer_voice module check: OK');
-    } catch (error) {
-      const stderr = error && typeof error === 'object' && 'stderr' in error ? String(error.stderr).trim() : '';
-      return {
-        installed: false,
-        setupError: createSetupError(
-          'DEPS_IMPORT_FAIL',
-          'Módulo esoccer_voice não carrega',
-          stderr || (error instanceof Error ? error.message : String(error)),
-          isWindows,
-        ),
-      };
-    }
-
     logMessage('info', 'Python dependencies check passed');
     return { installed: true };
   } catch (error) {
+    const stderr = error && typeof error === 'object' && 'stderr' in error ? String(error.stderr).trim() : '';
+    const isTimeout = error instanceof Error && error.message.includes('ETIMEDOUT');
     return {
       installed: false,
       setupError: createSetupError(
-        'UNKNOWN',
-        `Erro ao verificar dependências: ${error instanceof Error ? error.message : String(error)}`,
-        undefined,
+        isTimeout ? 'BACKEND_TIMEOUT' : 'UNKNOWN',
+        isTimeout
+          ? 'Verificação de dependências excedeu o tempo limite (120s). O sistema pode estar lento.'
+          : `Erro ao verificar dependências: ${error instanceof Error ? error.message : String(error)}`,
+        stderr || undefined,
         isWindows,
       ),
     };
