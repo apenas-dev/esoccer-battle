@@ -10,7 +10,33 @@ on:
       - 'v*' # Roda quando você cria uma tag (ex: v1.0.0)
 
 jobs:
+  # ── Cleanup old artifacts BEFORE building ──────────────────────────────────
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete ALL old artifacts to free storage
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const res = await github.rest.actions.listArtifactsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            for (const artifact of res.data.artifacts) {
+              console.log(`Deleting artifact: ${artifact.name} (${artifact.id}) - ${(artifact.size_in_bytes / 1024 / 1024).toFixed(1)}MB`);
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifact.id,
+              });
+            }
+            console.log(`Deleted ${res.data.artifacts.length} artifacts total.`);
+
   build-windows:
+    needs: cleanup
     runs-on: windows-latest
     steps:
       - name: Check out Git repository
@@ -123,12 +149,14 @@ jobs:
 
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: windows-executable
           path: apps/desktop/release/*.exe
           retention-days: 1
 
   build-linux:
+    needs: cleanup
     runs-on: ubuntu-latest
     steps:
       - name: Check out Git repository
@@ -158,6 +186,7 @@ jobs:
 
       - name: Upload Linux Artifacts
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: linux-executables
           path: |
