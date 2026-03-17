@@ -102,19 +102,22 @@ async def speechToText(
     
     Returns transcribed text in Portuguese (Brazilian).
     """
-    # Validate file type
-    allowedTypes = ["audio/wav", "audio/wave", "audio/x-wav", "audio/mpeg", 
-                    "audio/mp3", "audio/ogg", "application/ogg", "audio/webm"]
-    allowedExtensions = [".wav", ".mp3", ".ogg", ".webm"]
-    
+    # Validate file type — accept any audio/* content type (browsers append codec info like "audio/webm;codecs=opus")
     filename = file.filename or "audio"
     fileExt = "." + filename.split(".")[-1].lower() if "." in filename else ""
+    allowedExtensions = [".wav", ".mp3", ".ogg", ".webm"]
     
-    if file.content_type not in allowedTypes and fileExt not in allowedExtensions:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported audio format. Supported: WAV, MP3, OGG. Got: {file.content_type}"
-        )
+    # Check extension first (most reliable from FormData uploads)
+    if fileExt not in allowedExtensions:
+        # Also check content-type without codec parameters
+        ct = (file.content_type or "").split(";")[0].strip()
+        allowedTypes = ["audio/wav", "audio/wave", "audio/x-wav", "audio/mpeg", 
+                        "audio/mp3", "audio/ogg", "application/ogg", "audio/webm"]
+        if ct not in allowedTypes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported audio format. Supported: WAV, MP3, OGG, WebM. Got: {file.content_type}"
+            )
     
     try:
         # Read audio data

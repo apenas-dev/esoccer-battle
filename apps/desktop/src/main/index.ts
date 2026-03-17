@@ -409,23 +409,60 @@ async function startPythonBackend(): Promise<boolean> {
 
 /**
  * Stop the Python backend process
+ * NOTE: SIGTERM/SIGKILL are POSIX-only. On Windows, we must use
+ *       `taskkill /T /F` to kill the process tree (Python may spawn
+ *       child processes like uvicorn workers that would otherwise linger
+ *       and lock files, causing "re-download dependencies" on next launch).
  */
 function stopPythonBackend(): void {
-  if (pythonProcess) {
-    console.log('[Backend] Stopping Python voice-engine...');
+  if (!pythonProcess) return;
 
-    // Try graceful shutdown first
-    pythonProcess.kill('SIGTERM');
+  const pid = pythonProcess.pid;
+  logMessage('info', `Stopping Python voice-engine (pid: ${pid})...`);
 
-    // Force kill after timeout
-    setTimeout(() => {
-      if (pythonProcess) {
-        console.log('[Backend] Force killing process...');
-        pythonProcess.kill('SIGKILL');
-        pythonProcess = null;
+  try {
+    if (process.platform === 'win32') {
+      // On Windows, SIGTERM = immediate kill (no graceful shutdown).
+      // Use taskkill /T to kill the entire process tree so no child
+      // processes (uvicorn workers, etc.) survive and hold locks.
+      const { execSync } = require('child_process');
+      try {
+        execSync(`taskkill /pid ${pid} /T /F`, {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          timeout: 5000,
+        });
+        logMessage('info', 'Process tree killed via taskkill');
+      } catch {
+        // Fallback if taskkill fails (process may have already exited)
+        logMessage('warn', 'taskkill failed, process may have already exited');
+        try {
+          pythonProcess.kill();
+        } catch {
+          // Already dead
+        }
       }
-    }, 3000);
+    } else {
+      // POSIX: try graceful shutdown first
+      pythonProcess.kill('SIGTERM');
+
+      // Force kill after timeout
+      setTimeout(() => {
+        if (pythonProcess) {
+          logMessage('info', 'Force killing process (SIGKILL)...');
+          try {
+            pythonProcess.kill('SIGKILL');
+          } catch {
+            // Already dead
+          }
+          pythonProcess = null;
+        }
+      }, 3000);
+    }
+  } catch (err) {
+    logMessage('warn', `Error stopping process: ${err instanceof Error ? err.message : String(err)}`);
   }
+
+  pythonProcess = null;
 }
 
 /**
@@ -774,8 +811,7 @@ app.whenReady().then(async () => {
 
 // Cleanup on window close
 app.on('window-all-closed', () => {
-  stopPythonBackend();
-
+  // On non-macOS, quitting will trigger before-quit which handles process cleanup
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -783,7 +819,27 @@ app.on('window-all-closed', () => {
 
 // Cleanup on app quit
 app.on('before-quit', () => {
-  stopPythonBackend();
+  // Synchronous cleanup — before-quit fires before windows are closed,
+  // so we must kill the process tree synchronously to avoid lingering
+  // Python processes that could lock files and break the next launch.
+  if (pythonProcess) {
+    const pid = pythonProcess.pid;
+    logMessage('info', `before-quit: killing Python process tree (pid: ${pid})`);
+    try {
+      if (process.platform === 'win32') {
+        const { execSync } = require('child_process');
+        try {
+          execSync(`taskkill /pid ${pid} /T /F`, {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            timeout: 5000,
+          });
+        } catch { /* already dead */ }
+      } else {
+        try { pythonProcess.kill('SIGTERM'); } catch { /* already dead */ }
+      }
+    } catch { /* best effort */ }
+    pythonProcess = null;
+  }
 });
 
 // Handle uncaught errors

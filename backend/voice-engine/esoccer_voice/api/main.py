@@ -43,10 +43,14 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# Configure CORS
+# Configure CORS — restrict to Electron origins only (not wildcard)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for desktop app
+    allow_origins=[
+        "app://-",           # Electron production (file:// protocol)
+        "http://localhost",  # Electron dev (vite dev server)
+        "http://127.0.0.1",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
