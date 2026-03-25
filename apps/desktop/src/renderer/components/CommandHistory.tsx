@@ -1,10 +1,9 @@
 /**
- * CommandHistory Component
- * Shows command history for current match
- * Follows KISS + camelCase
+ * CommandHistory — Sidebar with icon'd command list
+ * Dark theme, sports broadcast style
  */
 
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 
 interface CommandEntry {
   input: string;
@@ -19,68 +18,117 @@ interface CommandHistoryProps {
   onSpeak?: (text: string) => void;
 }
 
+function getCommandIcon(input: string): { icon: string; color: string } {
+  const lower = input.toLowerCase();
+  if (lower.includes('volta') || lower.includes('iniciar'))
+    return { icon: '⏱', color: 'text-accent-blue' };
+  if (lower.includes('intervalo') || lower.includes('pausa'))
+    return { icon: '⏸', color: 'text-yellow-400' };
+  if (lower.includes('encerrar') || lower.includes('finaliz'))
+    return { icon: '❌', color: 'text-[#FF3B5C]' };
+  if (lower.includes('resultado') || lower.includes('placar'))
+    return { icon: '📊', color: 'text-accent-green' };
+  if (lower.includes('gol'))
+    return { icon: '⚽', color: 'text-[#FFD700]' };
+  return { icon: '❓', color: 'text-slate-400' };
+}
+
 export function CommandHistory({
   commands,
   lastTranscription,
   lastResponse,
-  onSpeak,
 }: CommandHistoryProps): React.ReactElement {
-  const hasContent = lastTranscription || lastResponse || commands.length > 0;
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to bottom on new commands
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [commands.length, lastTranscription]);
+
+  const hasContent = commands.length > 0 || lastTranscription || lastResponse;
 
   return (
-    <section className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-6">
-      <h2 className="text-lg font-semibold text-slate-300 mb-4">📝 Histórico de Comandos</h2>
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="px-4 py-3 border-b border-white/[0.06] flex items-center gap-2">
+        <span className="text-sm font-semibold text-slate-300">Histórico</span>
+        {commands.length > 0 && (
+          <span className="text-xs bg-white/10 text-slate-500 px-2 py-0.5 rounded-full">
+            {commands.length}
+          </span>
+        )}
+      </div>
 
-      {!hasContent ? (
-        <div className="text-center py-6">
-          <p className="text-slate-500 italic">Nenhum comando detectado ainda...</p>
-          <p className="text-slate-600 text-sm mt-2">Use comandos de voz ou texto para interagir</p>
-        </div>
-      ) : (
-        <div className="space-y-3 max-h-64 overflow-y-auto">
-          {/* Last Command (highlighted) */}
-          {(lastTranscription || lastResponse) && (
-            <div className="bg-slate-900/70 rounded-lg p-4 border border-blue-500/30">
-              {lastTranscription && (
-                <div className="mb-2">
-                  <p className="text-xs text-slate-500 mb-1">🎤 Entrada:</p>
-                  <p className="text-white font-mono text-sm">"{lastTranscription}"</p>
-                </div>
-              )}
-              {lastResponse && (
-                <div>
-                  <p className="text-xs text-slate-500 mb-1">🤖 Resposta:</p>
-                  <p className="text-green-400 font-mono text-sm">"{lastResponse}"</p>
-                  {onSpeak && (
-                    <button
-                      onClick={() => onSpeak(lastResponse)}
-                      className="mt-2 px-3 py-1 bg-blue-600/30 hover:bg-blue-600/50 text-blue-400 rounded text-xs transition-colors"
-                    >
-                      🔊 Ouvir
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Previous Commands */}
-          {commands.slice(-5).reverse().map((cmd, index) => (
-            <div
-              key={index}
-              className="bg-slate-900/40 rounded-lg p-3 border border-slate-700/30"
-            >
-              <div className="flex justify-between items-start mb-1">
-                <p className="text-slate-400 text-xs font-mono">"{cmd.input}"</p>
-                <span className="text-slate-600 text-xs">
-                  {cmd.timestamp.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+      {/* Command list */}
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1"
+      >
+        {!hasContent ? (
+          <div className="text-center py-12">
+            <p className="text-slate-600 text-sm">Nenhum comando</p>
+            <p className="text-slate-700 text-xs mt-1">Use voz ou texto</p>
+          </div>
+        ) : (
+          <>
+            {/* Last command highlighted */}
+            {lastTranscription && (
+              <div className="flex gap-3 p-3 rounded-lg bg-[#00FF87]/5 border-l-2 border-[#00FF87] animate-slideInLeft">
+                <span className="text-lg flex-shrink-0 mt-0.5">
+                  {getCommandIcon(lastTranscription).icon}
                 </span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-slate-200 text-sm font-mono truncate">
+                    {lastTranscription}
+                  </p>
+                  {lastResponse && (
+                    <p className="text-slate-500 text-xs mt-0.5 line-clamp-2">
+                      {lastResponse}
+                    </p>
+                  )}
+                  <span className="text-slate-600 text-xs font-mono">
+                    agora
+                  </span>
+                </div>
               </div>
-              <p className="text-green-400/70 text-xs font-mono">→ {cmd.response}</p>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
+            )}
+
+            {/* Previous commands (reversed, skip last) */}
+            {commands
+              .slice(0, -1)
+              .reverse()
+              .map((cmd, index) => {
+                const iconInfo = getCommandIcon(cmd.input);
+                return (
+                  <div
+                    key={index}
+                    className="flex gap-3 p-3 rounded-lg hover:bg-white/5 transition-colors"
+                  >
+                    <span className={`text-lg flex-shrink-0 mt-0.5 ${iconInfo.color}`}>
+                      {iconInfo.icon}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-slate-300 text-sm font-mono truncate">
+                        {cmd.input}
+                      </p>
+                      <p className="text-slate-600 text-xs mt-0.5 line-clamp-2">
+                        {cmd.response}
+                      </p>
+                    </div>
+                    <span className="text-slate-700 text-xs font-mono flex-shrink-0">
+                      {cmd.timestamp.toLocaleTimeString('pt-BR', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </span>
+                  </div>
+                );
+              })}
+          </>
+        )}
+      </div>
+    </div>
   );
 }

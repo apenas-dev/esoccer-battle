@@ -13,7 +13,6 @@ import { parseCommand, CommandId, ParsedCommand } from './commandParser';
 import { MatchStorePort } from '../ports/MatchStorePort';
 import { DoubtStorePort } from '../ports/DoubtStorePort';
 import { CommandLogStorePort } from '../ports/CommandLogStorePort';
-import { VoiceSynthesizerPort } from '../ports/VoiceSynthesizerPort';
 import { createCommandExecution } from '../entities/CommandExecution';
 
 import {
@@ -31,7 +30,6 @@ export interface CommandResult {
   success: boolean;
   commandId: CommandId;
   message: string;
-  audioResponse?: Float32Array;
   data?: unknown;
 }
 
@@ -39,7 +37,6 @@ export interface CommandEngineDependencies {
   matchStore: MatchStorePort;
   doubtStore: DoubtStorePort;
   commandLogStore: CommandLogStorePort;
-  voiceSynthesizer?: VoiceSynthesizerPort;
 }
 
 /**
@@ -49,14 +46,12 @@ export class CommandEngine {
   private matchStore: MatchStorePort;
   private doubtStore: DoubtStorePort;
   private commandLogStore: CommandLogStorePort;
-  private voiceSynthesizer?: VoiceSynthesizerPort;
   private pendingConfirmation: CommandId | null = null;
 
   constructor(dependencies: CommandEngineDependencies) {
     this.matchStore = dependencies.matchStore;
     this.doubtStore = dependencies.doubtStore;
     this.commandLogStore = dependencies.commandLogStore;
-    this.voiceSynthesizer = dependencies.voiceSynthesizer;
   }
 
   /**
@@ -86,15 +81,6 @@ export class CommandEngine {
     // Log command execution
     const latencyMs = Date.now() - startTime;
     await this.logExecution(parsed, result, latencyMs);
-
-    // Synthesize audio response if synthesizer is available
-    if (this.voiceSynthesizer && result.message) {
-      try {
-        result.audioResponse = await this.voiceSynthesizer.synthesizeSpeech(result.message);
-      } catch (error) {
-        console.error('Failed to synthesize speech:', error);
-      }
-    }
 
     return result;
   }

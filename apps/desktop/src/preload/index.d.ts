@@ -5,49 +5,43 @@
 import { ElectronAPI } from '@electron-toolkit/preload';
 import { Match } from '../core/entities/Match';
 import { CommandResult } from '../core/commands/CommandEngine';
+import { SetupError } from '../shared/SetupError';
 
 interface BackendHealthResponse {
   status: string;
-  backend: 'online' | 'offline' | 'connecting';
+  backend: 'online' | 'degraded' | 'offline';
   initError?: string;
-  backendDetails?: {
-    responseTime: number;
-    url: string;
-  };
 }
 
-interface ConnectionTestResult {
-  success: boolean;
-  message: string;
-  responseTime?: number;
+interface BackendStatus {
+  running: boolean;
+  error: SetupError | null;
+  url: string;
+  logPath: string;
 }
 
 interface EsoccerApi {
   // Health check
   getHealth: () => Promise<BackendHealthResponse>;
-  
-  // Voice control
-  startListening: () => Promise<{ success: boolean }>;
-  stopListening: () => Promise<{ success: boolean }>;
-  processVoiceCommand: (audioBuffer: Float32Array) => Promise<CommandResult>;
-  
+
   // Match management
   getCurrentMatch: () => Promise<Match | null>;
   getMatchHistory: () => Promise<Match[]>;
-  
-  // Text command (for testing/debugging)
+
+  // Text command processing
   processTextCommand: (text: string) => Promise<CommandResult>;
-  
-  // TTS direct
-  synthesizeSpeech: (text: string) => Promise<ArrayBuffer>;
-  
-  // Direct connection test
-  testBackendConnection: () => Promise<ConnectionTestResult>;
+
+  // Optional backend management
+  getBackendStatus: () => Promise<BackendStatus>;
+  getLogsPath: () => Promise<string>;
+  openLogs: () => Promise<void>;
 }
 
 declare global {
   interface Window {
-    electron: ElectronAPI;
-    esoccerApi: EsoccerApi;
+    electron?: ElectronAPI;
+    esoccerApi?: EsoccerApi;
   }
 }
+
+export { EsoccerApi };

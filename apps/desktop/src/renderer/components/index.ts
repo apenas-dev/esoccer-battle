@@ -1,7 +1,6 @@
 /**
  * Components Barrel File
  * Re-exports all UI components
- * Follows KISS pattern
  */
 
 export { ScoreBoard } from './ScoreBoard';

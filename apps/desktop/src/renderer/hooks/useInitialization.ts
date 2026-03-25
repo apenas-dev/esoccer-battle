@@ -1,22 +1,17 @@
 /**
  * useInitialization Hook
- * Manages app initialization state including first run detection and loading
+ * Manages app initialization state
+ * With WebSpeech, no Python backend is required — init goes straight to ready
  * Follows SOLID + KISS + camelCase
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { TerminalLine } from '../components/TerminalOutput';
-import { DownloadProgress } from '../components/DownloadScreen';
-import { LoadingProgress } from '../components/LoadingScreen';
+import { useState, useEffect } from 'react';
 import { SetupError, createSetupError } from '../../shared/SetupError';
 
-export type InitializationState = 'checking' | 'downloading' | 'loading' | 'ready' | 'error';
+export type InitializationState = 'checking' | 'ready' | 'error';
 
 interface UseInitializationReturn {
   state: InitializationState;
-  downloadProgress: DownloadProgress;
-  loadingProgress: LoadingProgress;
-  terminalLines: TerminalLine[];
   error: SetupError | null;
   retry: () => void;
   restart: () => void;
@@ -24,297 +19,62 @@ interface UseInitializationReturn {
 }
 
 /**
- * Generate unique ID for terminal lines
- */
-function generateLineId(): string {
-  return `line-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-}
-
-/**
  * Hook to manage initialization flow
+ * With WebSpeech STT and no Python backend, the app is ready as soon as
+ * the preload initializes the CommandEngine.
  */
 export function useInitialization(): UseInitializationReturn {
   const [state, setState] = useState<InitializationState>('checking');
-  const [downloadProgress, setDownloadProgress] = useState<DownloadProgress>({
-    stage: 'checking',
-    percentage: 0,
-    message: 'Verificando sistema...',
-  });
-  const [loadingProgress, setLoadingProgress] = useState<LoadingProgress>({
-    stage: 'backend',
-    percentage: 0,
-    message: 'Iniciando...',
-  });
-  const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
   const [error, setError] = useState<SetupError | null>(null);
   const [retryCount, setRetryCount] = useState(0);
-  const MAX_RETRIES = 3;
 
-  const unsubscribeRef = useRef<(() => void) | null>(null);
-  const isInitializedRef = useRef(false);
-
-  /**
-   * Add a line to the terminal output
-   */
-  const addTerminalLine = useCallback((text: string, type: TerminalLine['type'] = 'info') => {
-    setTerminalLines((prev) => [
-      ...prev,
-      { id: generateLineId(), text, type, timestamp: new Date() },
-    ]);
-  }, []);
-
-  /**
-   * Start the download process
-   */
-  const startDownload = useCallback(async () => {
-    if (!window.esoccerApi) {
-      setError(createSetupError('UNKNOWN', 'API do sistema não disponível', undefined, true));
-      setState('error');
-      return;
-    }
-
-    setTerminalLines([]);
-    addTerminalLine('Iniciando processo de download...', 'command');
-
-    // Subscribe to progress events
-    unsubscribeRef.current = window.esoccerApi.onDownloadProgress((event) => {
-      setDownloadProgress({
-        stage: event.stage,
-        percentage: event.percentage,
-        message: event.message,
-      });
-
-      // Add terminal line based on stage
-      if (event.stage === 'checking') {
-        addTerminalLine(event.message, 'info');
-      } else if (event.stage === 'dependencies') {
-        addTerminalLine(event.message, 'info');
-      } else if (event.stage === 'whisper') {
-        addTerminalLine(event.message, 'info');
-      } else if (event.stage === 'kokoro') {
-        addTerminalLine(event.message, 'info');
-      } else if (event.stage === 'complete') {
-        addTerminalLine(event.message, 'success');
-        setState('loading');
-      } else if (event.stage === 'error') {
-        addTerminalLine(`Erro no download: ${event.message}`, 'error');
-        // A partial error without SetupError context yet.
-        // It's usually followed by the result of startDownload() below.
-        setError((prev) => prev || createSetupError('MODEL_DOWNLOAD_FAIL', event.message, undefined, true));
-        setState('error');
-      }
-    });
-
-    // Start the download
-    const result = await window.esoccerApi.startDownload();
-
-    if (result.success) {
-      addTerminalLine('Download concluído com sucesso!', 'success');
-      // Move to loading state
-      startLoading();
-    } else {
-      addTerminalLine(`Erro: ${result.setupError?.message || 'Falha no download'}`, 'error');
-      setError(result.setupError || createSetupError('MODEL_DOWNLOAD_FAIL', 'Falha ao baixar modelos', undefined, true));
-      setDownloadProgress((prev) => ({ ...prev, stage: 'error' }));
-      setState('error');
-    }
-  }, [addTerminalLine]);
-
-  /**
-   * Start the loading process (for subsequent runs)
-   */
-  const startLoading = useCallback(async () => {
-    setState('loading');
-    setLoadingProgress({
-      stage: 'backend',
-      percentage: 0,
-      message: 'Iniciando backend Python...',
-    });
-
-    if (!window.esoccerApi) {
-      setError(createSetupError('UNKNOWN', 'API do sistema não disponível', undefined, true));
-      setState('error');
-      return;
-    }
-
-    // Poll for backend readiness
-    const maxAttempts = 60; // 60 seconds total
-    let attempts = 0;
-
-    const checkReady = async (): Promise<boolean> => {
-      try {
-        const result = await window.esoccerApi!.checkBackendReady();
-        return result.ready;
-      } catch {
-        return false;
-      }
-    };
-
-    // Update progress during loading
-    const progressInterval = setInterval(() => {
-      attempts++;
-      const percentage = Math.min(90, Math.floor((attempts / maxAttempts) * 90));
-
-      if (percentage < 20) {
-        setLoadingProgress({
-          stage: 'backend',
-          percentage,
-          message: 'Iniciando backend...',
-        });
-      } else if (percentage < 50) {
-        setLoadingProgress({
-          stage: 'stt',
-          percentage,
-          message: 'Carregando modelo STT (Whisper)...',
-        });
-      } else if (percentage < 80) {
-        setLoadingProgress({
-          stage: 'tts',
-          percentage,
-          message: 'Carregando modelo TTS (Kokoro)...',
-        });
-      } else {
-        setLoadingProgress({
-          stage: 'finalizing',
-          percentage,
-          message: 'Finalizando...',
-        });
-      }
-    }, 1000);
-
-    // Wait for backend to be ready
-    while (attempts < maxAttempts) {
-      const isReady = await checkReady();
-      if (isReady) {
-        clearInterval(progressInterval);
-        setLoadingProgress({
-          stage: 'ready',
-          percentage: 100,
-          message: 'Sistema pronto!',
-        });
-        setState('ready');
-        return;
-      }
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-
-    clearInterval(progressInterval);
-    setError(createSetupError(
-      'BACKEND_TIMEOUT',
-      'Timeout ao aguardar o backend.',
-      'O inicializador falhou em responder após 60 segundos.',
-      true
-    ));
-    setLoadingProgress({
-      stage: 'error',
-      percentage: 0,
-      message: 'Falha ao iniciar backend',
-    });
-    setState('error');
-  }, []);
-
-  /**
-   * Retry download
-   */
-  const retry = useCallback(() => {
-    setRetryCount(prev => prev + 1);
-    setError(null);
-    setTerminalLines([]);
-    setDownloadProgress({
-      stage: 'checking',
-      percentage: 0,
-      message: 'Tentando novamente...',
-    });
-    setState('downloading');
-    startDownload();
-  }, [startDownload]);
-
-  /**
-   * Restart loading
-   */
-  const restart = useCallback(async () => {
-    setRetryCount(prev => prev + 1);
-    setError(null);
-    setLoadingProgress({
-      stage: 'backend',
-      percentage: 0,
-      message: 'Reiniciando...',
-    });
-    setState('loading');
-
-    if (window.esoccerApi) {
-      await window.esoccerApi.restartBackend();
-    }
-
-    startLoading();
-  }, [startLoading]);
-
-  /**
-   * Initial check on mount
-   */
   useEffect(() => {
-    if (isInitializedRef.current) return;
-    isInitializedRef.current = true;
-
     const initialize = async () => {
-      if (!window.esoccerApi) {
-        // Wait a bit for API to be available
-        await new Promise((r) => setTimeout(r, 500));
+      try {
+        // Wait briefly for API to be available
+        await new Promise((r) => setTimeout(r, 300));
+
         if (!window.esoccerApi) {
-          setError(createSetupError('UNKNOWN', 'API não disponível. Reinicie o aplicativo.', undefined, true));
+          setError(createSetupError('UNKNOWN', 'API não disponível. Reinicie o aplicativo.', undefined, false));
           setState('error');
           return;
         }
-      }
 
-      try {
-        // Check if this is first run
-        const { isFirstRun } = await window.esoccerApi.checkFirstRun();
-
-        if (isFirstRun) {
-          // First run - need to download models
-          setState('downloading');
-          startDownload();
-        } else {
-          // Subsequent run - just load
-          startLoading();
+        // Check health — if preload stores initialized correctly, we're good
+        const health = await window.esoccerApi.getHealth();
+        if (health.initError) {
+          console.warn('[useInitialization] Init warning:', health.initError);
+          // Still proceed — degraded mode
         }
+
+        setState('ready');
       } catch (err) {
-        console.error('[useInitialization] Error checking first run:', err);
-        // Default to loading state
-        startLoading();
+        console.error('[useInitialization] Error:', err);
+        setError(createSetupError(
+          'UNKNOWN',
+          err instanceof Error ? err.message : 'Erro na inicialização',
+          undefined,
+          false
+        ));
+        setState('error');
       }
     };
 
     initialize();
-
-    // Cleanup
-    return () => {
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-      }
-    };
-  }, [startDownload, startLoading]);
-
-  // Subscribe to backend errors
-  useEffect(() => {
-    if (!window.esoccerApi) return;
-
-    const unsubscribe = window.esoccerApi.onBackendError((errorObj) => {
-      setError(errorObj);
-      setState('error');
-    });
-
-    return () => {
-      unsubscribe();
-    };
   }, []);
+
+  const retry = () => {
+    setRetryCount((prev) => prev + 1);
+    setError(null);
+    setState('checking');
+    // Re-trigger by re-mounting — caller should handle this
+    setTimeout(() => setState('ready'), 500);
+  };
+
+  const restart = retry;
 
   return {
     state,
-    downloadProgress,
-    loadingProgress,
-    terminalLines,
     error,
     retry,
     restart,

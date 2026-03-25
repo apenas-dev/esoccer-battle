@@ -510,148 +510,6 @@ function createWindow(): void {
   }
 }
 
-/**
- * Check if models are already downloaded
- * IMPORTANT: Uses the same writable models directory as the Python backend
- * (app.getPath('userData')/models) to ensure consistency
- */
-function checkModelsExist(): { whisperReady: boolean; kokoroReady: boolean; modelsDir: string } {
-  // Use the same writable models directory as startPythonBackend()
-  const modelsDir = join(app.getPath('userData'), 'models');
-  const whisperDir = join(modelsDir, 'whisper');
-  const kokoroDir = join(modelsDir, 'kokoro');
-
-  logMessage('info', `Checking models in: ${modelsDir}`);
-
-  // Check for whisper model files
-  let whisperReady = false;
-  if (existsSync(whisperDir)) {
-    try {
-      const { readdirSync } = require('fs');
-      const files = readdirSync(whisperDir, { recursive: true }) as string[];
-      whisperReady = files.some((f: string) =>
-        f.endsWith('.bin') || f.endsWith('.ct2') || f.endsWith('.onnx')
-      );
-      logMessage('info', `Whisper dir exists, model ready: ${whisperReady}, files: ${files.length}`);
-    } catch (e) {
-      logMessage('warn', `Error checking whisper dir: ${e}`);
-      whisperReady = false;
-    }
-  } else {
-    logMessage('info', `Whisper dir does not exist: ${whisperDir}`);
-  }
-
-  // Check for kokoro model files
-  let kokoroReady = false;
-  if (existsSync(kokoroDir)) {
-    try {
-      const { readdirSync } = require('fs');
-      const files = readdirSync(kokoroDir, { recursive: true }) as string[];
-      kokoroReady = files.some((f: string) =>
-        f.endsWith('.pth') || f.endsWith('.pt') || f.endsWith('.bin') || f.endsWith('.onnx')
-      );
-      logMessage('info', `Kokoro dir exists, model ready: ${kokoroReady}, files: ${files.length}`);
-    } catch (e) {
-      logMessage('warn', `Error checking kokoro dir: ${e}`);
-      kokoroReady = false;
-    }
-  } else {
-    logMessage('info', `Kokoro dir does not exist: ${kokoroDir}`);
-  }
-
-  logMessage('info', `Models check result: whisper=${whisperReady}, kokoro=${kokoroReady}`);
-  return { whisperReady, kokoroReady, modelsDir };
-}
-
-/**
- * Download models via Python backend API
- */
-async function downloadModels(
-  onProgress: (stage: string, percentage: number, message: string) => void
-): Promise<{ success: boolean; setupError?: SetupError }> {
-  try {
-    onProgress('checking', 5, 'Verificando backend...');
-
-    // Ensure backend is running - give it more time (60s) on first run
-    const isBackendUp = await waitForBackendReady(60000);
-    if (!isBackendUp) {
-      // Try to start backend if not running
-      if (!pythonProcess || pythonProcess.exitCode !== null) {
-        logMessage('info', 'Backend not running, attempting to start...');
-        onProgress('checking', 8, 'Iniciando backend...');
-        const started = await startPythonBackend();
-        if (!started) {
-          return { success: false, setupError: backendError || createSetupError('UNKNOWN', 'Falha ao iniciar backend', undefined, process.platform === 'win32') };
-        }
-        // Wait again after starting
-        const isReady = await waitForBackendReady(30000);
-        if (!isReady) {
-          return { success: false, setupError: createSetupError('BACKEND_TIMEOUT', 'Backend iniciou mas não respondeu', undefined, process.platform === 'win32') };
-        }
-      } else {
-        return { success: false, setupError: createSetupError('BACKEND_HEALTH_FAIL', 'Backend não está respondendo. Verifique os logs.', undefined, process.platform === 'win32') };
-      }
-    }
-
-    onProgress('dependencies', 15, 'Iniciando download dos modelos...');
-
-    // Call the models/download endpoint
-    const response = await fetch(`${PYTHON_BACKEND_URL}/models/download`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(600000), // 10 minute timeout for downloads
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      return {
-        success: false,
-        setupError: createSetupError(
-          'MODEL_DOWNLOAD_FAIL',
-          `Download falhou (HTTP ${response.status})`,
-          errorText,
-          process.platform === 'win32',
-        ),
-      };
-    }
-
-    const result = await response.json();
-
-    if (result.whisperReady && result.kokoroReady) {
-      onProgress('complete', 100, 'Modelos baixados com sucesso!');
-      return { success: true };
-    } else {
-      const failedModels = [
-        !result.whisperReady ? 'Whisper' : '',
-        !result.kokoroReady ? 'Kokoro' : '',
-      ].filter(Boolean).join(', ');
-      return {
-        success: false,
-        setupError: createSetupError(
-          'MODEL_DOWNLOAD_FAIL',
-          `Download incompleto — modelo(s) faltando: ${failedModels}`,
-          `Whisper: ${result.whisperReady ? 'OK' : 'FALHOU'}\nKokoro: ${result.kokoroReady ? 'OK' : 'FALHOU'}`,
-          process.platform === 'win32',
-        ),
-      };
-    }
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    logMessage('error', `Download models failed: ${errorMsg}`);
-    const isTimeout = errorMsg.includes('timeout') || errorMsg.includes('abort');
-    return {
-      success: false,
-      setupError: createSetupError(
-        isTimeout ? 'MODEL_DOWNLOAD_TIMEOUT' : 'MODEL_DOWNLOAD_FAIL',
-        isTimeout
-          ? 'Download demorou mais de 10 minutos. Verifique sua conexão.'
-          : `Falha no download: ${errorMsg}`,
-        error instanceof Error ? error.stack : undefined,
-        process.platform === 'win32',
-      ),
-    };
-  }
-}
 
 /**
  * Setup IPC handlers for backend management
@@ -690,78 +548,6 @@ function setupIpcHandlers(): void {
     return join(app.getPath('userData'), 'logs', 'backend.log');
   });
 
-  // Check if this is first run (models not downloaded)
-  ipcMain.handle('check-first-run', () => {
-    const modelsStatus = checkModelsExist();
-    const isFirstRun = !modelsStatus.whisperReady || !modelsStatus.kokoroReady;
-    logMessage('info', `First run check: ${isFirstRun}`);
-    return {
-      isFirstRun,
-      modelsStatus,
-    };
-  });
-
-  // Start download process (models only — deps are pre-installed at build time)
-  ipcMain.handle('start-download', async () => {
-    logMessage('info', 'Download started via IPC');
-
-    const sendProgress = (stage: string, percentage: number, message: string) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('download-progress', { stage, percentage, message });
-      }
-    };
-
-    sendProgress('checking', 5, 'Verificando sistema...');
-    await new Promise(r => setTimeout(r, 300));
-
-    // Verify Python is available
-    const pythonCmd = getPythonCmd();
-    if (!pythonCmd) {
-      const err = createSetupError(
-        process.platform === 'win32' ? 'PYTHON_EMBEDDED_MISSING' : 'PYTHON_NOT_FOUND',
-        'Python não encontrado. Reinstale o aplicativo.',
-        undefined,
-        process.platform === 'win32',
-      );
-      sendProgress('error', 0, err.message);
-      return { success: false, setupError: err };
-    }
-
-    sendProgress('checking', 10, 'Python OK');
-    sendProgress('dependencies', 20, 'Dependências OK');
-    await new Promise(r => setTimeout(r, 300));
-
-    // Start backend if needed
-    sendProgress('backend', 22, 'Verificando backend...');
-
-    if (!pythonProcess || pythonProcess.exitCode !== null) {
-      logMessage('info', 'Backend not running, starting...');
-      sendProgress('backend', 24, 'Iniciando backend Python...');
-
-      const started = await startPythonBackend();
-      if (!started) {
-        const err = backendError || createSetupError('UNKNOWN', 'Falha ao iniciar backend', undefined, process.platform === 'win32');
-        sendProgress('error', 0, err.message);
-        return { success: false, setupError: err };
-      }
-    }
-
-    sendProgress('backend', 28, 'Backend pronto');
-    await new Promise(r => setTimeout(r, 300));
-
-    // Download models
-    sendProgress('whisper', 30, 'Iniciando download do Whisper (~1GB)...');
-
-    const result = await downloadModels(sendProgress);
-
-    if (result.success) {
-      sendProgress('complete', 100, 'Instalação completa!');
-      return { success: true };
-    } else {
-      sendProgress('error', 0, result.setupError?.message || 'Erro desconhecido');
-      return { success: false, setupError: result.setupError };
-    }
-  });
 
   // Get loading progress (for subsequent runs)
   ipcMain.handle('check-backend-ready', async () => {
@@ -793,11 +579,10 @@ app.whenReady().then(async () => {
   // Setup IPC handlers first
   setupIpcHandlers();
 
-  // Start Python backend
-  const backendStarted = await startPythonBackend();
-  if (!backendStarted) {
-    logMessage('warn', 'Backend failed to start, app will run with limited functionality');
-  }
+  // Try to start Python backend (optional — app works without it)
+  // Python backend is kept for future/reference but not required
+  console.log('[App] Python backend is optional — skipping auto-start');
+  console.log('[App] Voice recognition uses browser-native WebSpeech API');
 
   // Create window
   createWindow();
